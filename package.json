@@ -1,8 +1,15 @@
 {
   "name": "gremlin-neurogenesis",
   "version": "1.0.0",
+  "description": "Local-first sparse neuro-evolutionary organism server and browser UI.",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
-  }
+    "start": "node server.js",
+    "check": "node --check server.js && node --check engine.js && node --check app.js && node --check worker.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
 }

@@ -795,14 +795,21 @@
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `genesis-lab-generation-${state.lab.generation}.json`;
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
     anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      anchor.remove();
+    }, 1000);
+    log(`Exported model generation ${state.lab.generation}.`);
   }
 
   async function importModel(file) {
     const text = await readFileAsText(file);
     const data = JSON.parse(text);
-    if (!data.champion) throw new Error("No champion genome found");
+    const champion = data.champion || data.genome || (data.neurons && data.synapses ? data : null);
+    if (!champion) throw new Error("No champion genome found");
     el("corpusText").value = data.corpus || el("corpusText").value;
     state.lab.setCorpus(el("corpusText").value);
     if (Array.isArray(data.corpora)) state.lab.corpora = data.corpora;
@@ -810,8 +817,9 @@
     if (Array.isArray(data.memoryBank)) state.lab.memoryBank = data.memoryBank.slice(-180);
     if (data.curriculumLevel) state.lab.curriculumLevel = data.curriculumLevel;
     state.lab.setConfig(data.config || {});
-    const genome = state.lab.importChampion(data.champion, { lazyPopulation: true });
+    const genome = state.lab.importChampion(champion, { lazyPopulation: true });
     restoreImageTargets(data.imageTargets);
+    el("modelInput").value = "";
     log(`Imported model: generation ${genome.generation}, ${genome.neurons} neurons, ${genome.synapses} synapses. Population will refill gradually during evolution.`);
     updateReadout();
     renderImage();
