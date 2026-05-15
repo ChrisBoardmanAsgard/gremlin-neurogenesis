@@ -518,6 +518,9 @@
       this.dialogueScore = options.dialogueScore || 0;
       this.growthGain = options.growthGain || 0;
       this.embeddingMutationGain = options.embeddingMutationGain || 0;
+      this.metadata = { ...(options.metadata || {}) };
+      this.metadata.dreamCount = Math.max(0, Math.floor(Number(this.metadata.dreamCount ?? options.dreamCount ?? 0)));
+      this.dreamCount = this.metadata.dreamCount;
       this.previousFitness = options.previousFitness || 0;
       this.previousNeurons = options.previousNeurons || this.neurons;
       this.previousSynapses = options.previousSynapses || this.synapses;
@@ -596,6 +599,7 @@
         dialogueScore: this.dialogueScore,
         growthGain: this.growthGain,
         embeddingMutationGain: this.embeddingMutationGain,
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -652,6 +656,7 @@
         dialogueScore: this.dialogueScore,
         growthGain: this.growthGain,
         embeddingMutationGain: this.embeddingMutationGain,
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -2048,8 +2053,14 @@
     }
 
     dreamReplay(options = {}) {
-      if (!this.memoryBank.length && !this.persistentContext) return { dreamed: 0, loss: this.best().loss, coherence: this.best().coherenceScore || 0 };
+      const champion = this.best();
+      const sourceText = cleanTrainingText(`${this.persistentContext}\n${this.corpus}`, options.sourceChars ?? 9000);
+      if (!this.memoryBank.length && !sourceText) return { dreamed: 0, loss: champion.loss, coherence: champion.coherenceScore || 0, tuned: null, lossDelta: 0 };
       const count = clamp(Math.floor(options.count ?? 6), 1, 18);
+      const charBudget = clamp(Math.floor(options.maxChars ?? 1100), 240, 4000);
+      const recentChars = Math.max(120, Math.floor(charBudget * 0.4));
+      const memoryChars = Math.max(120, Math.floor(charBudget * 0.4));
+      const corpusChars = Math.max(80, Math.floor(charBudget * 0.2));
       const now = Date.now();
       const memories = this.memoryBank
         .map(item => {
@@ -2061,12 +2072,30 @@
         .sort((a, b) => b.score - a.score)
         .slice(0, count)
         .map(row => row.item.text);
+      let memoryReplay = "";
+      for (const memory of memories) {
+        if (memoryReplay.length >= memoryChars) break;
+        memoryReplay = `${memoryReplay}\n${memory}`.trim();
+      }
+      const weakTurns = this.memoryBank
+        .map(item => ({ item, quality: chatQualityScore(item.text) + textEntropy(item.text) * 0.25 }))
+        .filter(row => row.quality > 0.08 && row.quality < 0.48)
+        .sort((a, b) => a.quality - b.quality)
+        .slice(0, options.weakTurnCount ?? 3)
+        .map(row => row.item.text);
+      const coherenceBoost = weakTurns.length
+        ? Array.from({ length: clamp(Math.floor(options.weakTurnRepeats ?? 2), 1, 3) }, () => weakTurns.join("\n")).join("\n")
+        : "";
+      const corpusReplay = options.includeCorpus === false
+        ? ""
+        : dialogueTrainingText(sourceText, options.corpusChars ?? corpusChars);
       const replay = [
         CHAT_PRIMER_TEXT,
-        this.persistentContext.slice(-5000),
-        memories.join("\n")
+        this.persistentContext.slice(-recentChars),
+        memoryReplay,
+        coherenceBoost,
+        corpusReplay
       ].filter(Boolean).join("\n");
-      const champion = this.best();
       const beforeLoss = champion.loss;
       const oldPlasticity = champion.plasticityRate;
       champion.plasticityRate = clamp(oldPlasticity * (options.plasticityBoost ?? 2.2), 0, 0.04);
@@ -2082,7 +2111,20 @@
       champion.evaluateCoherence(replay, "Recall a useful memory and answer coherently.");
       champion.selfTuningGain = clamp((champion.selfTuningGain || 0) + Math.max(0, (beforeLoss || champion.loss) - champion.loss) * 0.5, 0, 0.5);
       this.shapeFitness(champion, { ...options, trainingText: replay });
-      return { dreamed: memories.length, loss: champion.loss, coherence: champion.coherenceScore || 0, tuned };
+      if (options.incrementDreamCount) {
+        champion.metadata = { ...(champion.metadata || {}) };
+        champion.dreamCount = Math.max(0, Math.floor(Number(champion.dreamCount || champion.metadata.dreamCount || 0))) + 1;
+        champion.metadata.dreamCount = champion.dreamCount;
+      }
+      return {
+        dreamed: memories.length + (corpusReplay ? 1 : 0) + weakTurns.length,
+        loss: champion.loss,
+        coherence: champion.coherenceScore || 0,
+        tuned,
+        lossDelta: (beforeLoss || champion.loss) - champion.loss,
+        dreamCount: champion.dreamCount || 0,
+        mix: { recent: 0.4, memory: 0.4, corpus: options.includeCorpus === false ? 0 : 0.2, weakTurns: weakTurns.length }
+      };
     }
   }
 

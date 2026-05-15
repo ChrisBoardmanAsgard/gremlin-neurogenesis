@@ -33,6 +33,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -52,6 +53,12 @@ button:hover {
   border-color: rgba(185, 242, 109, 0.5);
 }
 
+button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  transform: none;
+}
+
 button.primary {
   background: linear-gradient(135deg, #b9f26d, #54d2c4);
   color: #0d130d;
@@ -64,6 +71,7 @@ button.subtle {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid rgba(244, 240, 223, 0.12);

@@ -57,11 +57,20 @@
             <span>Mutation</span>
             <input id="mutationInput" type="range" min="0.002" max="0.14" step="0.002" value="0.035">
           </label>
+          <label>
+            <span>Dream epochs</span>
+            <select id="dreamEpochsInput">
+              <option value="5">5 light</option>
+              <option value="12" selected>12 balanced</option>
+              <option value="25">25 deep</option>
+            </select>
+          </label>
           <div class="button-row">
             <button id="seedButton" type="button">Seed</button>
             <button id="evolveButton" type="button" class="primary">Evolve</button>
           </div>
           <button id="pauseButton" type="button" class="wide subtle">Pause</button>
+          <button id="dreamButton" type="button" class="wide subtle">Dream</button>
         </section>
 
         <section class="stats-grid" aria-label="Model statistics">

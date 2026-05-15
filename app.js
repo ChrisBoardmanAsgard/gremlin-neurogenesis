@@ -17,6 +17,7 @@
     topologyLastDraw: 0,
     lastActivityAt: 0,
     cachedActivity: null,
+    dreaming: false,
     statusTimer: 0
   };
   const MAX_IMPORTED_TEXT_CHARS = 1_200_000;
@@ -62,6 +63,21 @@
 
   function setToolStatus(message) {
     if (el("toolStatus")) el("toolStatus").textContent = message;
+  }
+
+  function syncTrainingControls() {
+    if (el("evolveButton")) el("evolveButton").textContent = state.evolving ? "Stop" : "Evolve";
+    if (el("pauseButton")) el("pauseButton").textContent = state.evolving ? "Pause" : "Paused";
+    if (el("dreamButton")) {
+      el("dreamButton").disabled = state.evolving || state.dreaming;
+      el("dreamButton").textContent = state.dreaming ? "Dreaming" : "Dream";
+    }
+  }
+
+  function readyToTrain() {
+    setStatus("Ready to train");
+    log("ready to train");
+    syncTrainingControls();
   }
 
   function serializableImageTarget(target) {
@@ -374,6 +390,58 @@
     el("viewSubtitle").textContent = views[name].subtitle;
   }
 
+  async function runManualDreamPhase() {
+    if (state.evolving) {
+      log("Pause evolution before starting dream replay.");
+      return;
+    }
+    if (state.dreaming) return;
+    state.dreaming = true;
+    syncTrainingControls();
+    setStatus("Dreaming");
+    saveBrowserCheckpoint("before-manual-dream");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    try {
+      const before = state.lab.best();
+      const beforeLoss = before.loss || 0;
+      const epochs = clamp(Number(el("dreamEpochsInput")?.value || 12), 5, 25);
+      const spinner = ["|", "/", "-", "\\"];
+      let result = null;
+      let traces = 0;
+      for (let epoch = 1; epoch <= epochs; epoch++) {
+        log(`${spinner[(epoch - 1) % spinner.length]} Dreaming... (${epoch}/${epochs} epochs)`);
+        result = state.lab.dreamReplay({
+          count: epochs >= 25 ? 14 : epochs >= 12 ? 10 : 6,
+          maxChars: Number(state.lab.config.neurons) > 1800 ? 1200 : 1700,
+          maxTokens: Number(state.lab.config.neurons) > 1800 ? 440 : 620,
+          gradientSteps: epochs >= 25 ? 2 : 1,
+          gradientLearningRate: Math.min(0.03, (state.lab.config.gradientLearningRate || 0.016) * (epochs >= 25 ? 1.2 : 1.4)),
+          plasticityBoost: epochs >= 25 ? 2.2 : 2.6,
+          weakTurnRepeats: epochs >= 12 ? 3 : 2,
+          incrementDreamCount: epoch === epochs
+        });
+        traces += result.dreamed || 0;
+        if (epoch % 3 === 0 || epoch === epochs) updateReadout();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      saveBrowserCheckpoint("after-manual-dream");
+      result = result || { loss: beforeLoss, coherence: 0, dreamCount: state.lab.best().dreamCount || 0 };
+      const lossDelta = Number.isFinite(result.lossDelta) ? result.lossDelta : beforeLoss - (result.loss || beforeLoss);
+      const totalImprovement = Math.max(0, beforeLoss - (result.loss || beforeLoss));
+      log(`Dream replay consolidated ${traces} trace(s). Loss ${Number(result.loss || 0).toFixed(3)} (${lossDelta >= 0 ? "-" : "+"}${Math.abs(lossDelta).toFixed(3)}), coherence ${Number(result.coherence || 0).toFixed(2)}, lineage dreams ${result.dreamCount || state.lab.best().dreamCount || 0}.`);
+      log(`Dream phase complete ✓ Loss improved by ${totalImprovement.toFixed(2)} — ready to train`);
+      setStatus("Ready to train");
+      updateReadout();
+      requestAnimationFrame(renderImage);
+    } catch (error) {
+      log(`Dream replay paused safely: ${error.message}`);
+      setStatus("Dream paused");
+    } finally {
+      state.dreaming = false;
+      syncTrainingControls();
+    }
+  }
+
   async function evolveStep(imageOptions = {}) {
     syncConfigToLab();
     const imageTargets = state.imageTargets.length ? state.imageTargets : [];
@@ -466,7 +534,7 @@
     } catch (error) {
       log(`Evolution stopped: ${error.message}`);
       state.evolving = false;
-      el("evolveButton").textContent = "Evolve";
+      syncTrainingControls();
       setStatus("Error");
       return;
     }
@@ -1101,18 +1169,17 @@
 
     el("evolveButton").addEventListener("click", () => {
       state.evolving = !state.evolving;
-      el("evolveButton").textContent = state.evolving ? "Stop" : "Evolve";
-      el("pauseButton").textContent = state.evolving ? "Pause" : "Paused";
+      syncTrainingControls();
       if (state.evolving) evolveLoop();
-      else setStatus("Paused");
+      else readyToTrain();
     });
 
     el("pauseButton").addEventListener("click", () => {
       state.evolving = false;
-      el("evolveButton").textContent = "Evolve";
-      el("pauseButton").textContent = "Paused";
-      setStatus("Paused");
+      readyToTrain();
     });
+
+    el("dreamButton").addEventListener("click", runManualDreamPhase);
 
     el("wikiButton").addEventListener("click", importWikipedia);
     el("wikiBatchButton").addEventListener("click", importWikipediaBatch);
@@ -1189,6 +1256,7 @@
     }
     log("Ready. This app uses no external AI model or AI API.");
     log(`400 neurons is the default seed size; the current UI allows up to ${MAX_NEURONS.toLocaleString()} neurons and ${MAX_SYNAPSES.toLocaleString()} synapses.`);
+    readyToTrain();
     updateReadout();
     renderImage();
     if (location.hash === "#topology") toggleTopologyView();
