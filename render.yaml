@@ -13,4 +13,16 @@ services:
       - key: AUTO_EVOLVE
         value: "1"
       - key: EVOLVE_DELAY_MS
-        value: "1200"
+        value: "900"
+      - key: POPULATION_SIZE
+        value: "16"
+      - key: MAX_NEURONS
+        value: "12000"
+      - key: MAX_SYNAPSES
+        value: "300000"
+      - key: MEMORY_LIMIT_MB
+        value: "2048"
+      - key: CPU_HIGH_WATERMARK
+        value: "0.82"
+      - key: CPU_LOW_WATERMARK
+        value: "0.45"

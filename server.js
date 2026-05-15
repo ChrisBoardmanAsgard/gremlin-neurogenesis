@@ -10,6 +10,20 @@ require("./engine.js");
 const root = __dirname;
 const port = Number(process.env.PORT || process.argv[2] || 4173);
 const isHosted = Boolean(process.env.RENDER || process.env.NODE_ENV === "production");
+const envNumber = (name, fallback, min, max) => {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+};
+const baseEvolutionDelayMs = envNumber("EVOLVE_DELAY_MS", isHosted ? 900 : 180, 50, 30_000);
+const minEvolutionDelayMs = envNumber("MIN_EVOLVE_DELAY_MS", Math.max(120, Math.floor(baseEvolutionDelayMs * 0.6)), 50, 30_000);
+const maxEvolutionDelayMs = envNumber("MAX_EVOLVE_DELAY_MS", isHosted ? 12_000 : 5_000, baseEvolutionDelayMs, 60_000);
+const memoryLimitMb = envNumber("MEMORY_LIMIT_MB", isHosted ? 2048 : 4096, 256, 65536);
+const cpuHighWatermark = Math.max(0.1, Math.min(2, Number(process.env.CPU_HIGH_WATERMARK || 0.82)));
+const cpuLowWatermark = Math.max(0.05, Math.min(cpuHighWatermark, Number(process.env.CPU_LOW_WATERMARK || 0.45)));
+const serverRuntimeConfig = {
+  populationSize: envNumber("POPULATION_SIZE", isHosted ? 16 : 10, 4, 24)
+};
 const dataDir = path.join(root, "data");
 const backupsDir = path.join(dataDir, "backups");
 const serverModelPath = path.join(dataDir, "server-model.json");
@@ -35,11 +49,22 @@ let results = [];
 let workerSeen = new Map();
 let wsClients = new Set();
 let rateBuckets = new Map();
-let serverLab = new EvolutionLab();
+let serverLab = new EvolutionLab(serverRuntimeConfig);
 let serverImageTargets = [];
 let serverEvolution = {
   running: false,
-  delayMs: Number(process.env.EVOLVE_DELAY_MS || (isHosted ? 1200 : 180)),
+  delayMs: baseEvolutionDelayMs,
+  baseDelayMs: baseEvolutionDelayMs,
+  throttle: {
+    cpuRatio: 0,
+    memoryRatio: 0,
+    reason: "starting",
+    updatedAt: null
+  },
+  pressureSample: {
+    at: Date.now(),
+    cpu: process.cpuUsage()
+  },
   lastSavedAt: 0,
   startedAt: null,
   cycles: 0,
@@ -68,6 +93,63 @@ const MIN_SELF_GENERATED_ENTROPY = 0.48;
 
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(backupsDir, { recursive: true });
+
+function enforceServerRuntimeLimits() {
+  serverLab.setConfig({
+    ...serverRuntimeConfig,
+    populationSize: serverRuntimeConfig.populationSize
+  });
+  if (serverLab.population.length > serverLab.config.populationSize) {
+    serverLab.population.sort((a, b) => (b.fitness || 0) - (a.fitness || 0));
+    serverLab.population = serverLab.population.slice(0, serverLab.config.populationSize);
+  }
+  for (const genome of serverLab.population) {
+    if (genome.neurons > serverLab.config.neurons || genome.synapses > serverLab.config.synapses) {
+      genome.resize(Math.min(genome.neurons, serverLab.config.neurons), Math.min(genome.synapses, serverLab.config.synapses));
+    }
+  }
+}
+
+function sampleResourcePressure() {
+  const now = Date.now();
+  const previous = serverEvolution.pressureSample || { at: now, cpu: process.cpuUsage() };
+  const cpuDelta = process.cpuUsage(previous.cpu);
+  const elapsedMs = Math.max(1, now - previous.at);
+  const cpuRatio = Math.max(0, (cpuDelta.user + cpuDelta.system) / (elapsedMs * 1000));
+  const memoryRatio = Math.max(0, Math.min(2, process.memoryUsage().rss / (memoryLimitMb * 1024 * 1024)));
+  serverEvolution.pressureSample = { at: now, cpu: process.cpuUsage() };
+  return { cpuRatio, memoryRatio };
+}
+
+function updateAutoThrottle(tickElapsedMs = 0) {
+  const pressure = sampleResourcePressure();
+  const busyTick = tickElapsedMs > serverEvolution.delayMs * 0.85;
+  let reason = "balanced";
+  let nextDelay = serverEvolution.delayMs;
+  if (pressure.memoryRatio > 0.88) {
+    nextDelay = Math.min(maxEvolutionDelayMs, Math.ceil(nextDelay * 1.8));
+    reason = "memory-high";
+  } else if (pressure.cpuRatio > cpuHighWatermark || busyTick) {
+    const scale = pressure.cpuRatio > 1.05 ? 1.65 : 1.28;
+    nextDelay = Math.min(maxEvolutionDelayMs, Math.ceil(nextDelay * scale));
+    reason = busyTick ? "tick-slow" : "cpu-high";
+  } else if (pressure.cpuRatio < cpuLowWatermark && pressure.memoryRatio < 0.72) {
+    nextDelay = Math.max(minEvolutionDelayMs, Math.floor(nextDelay * 0.9));
+    reason = "cooling-down";
+  } else {
+    const drift = nextDelay > serverEvolution.baseDelayMs ? 0.96 : 1.02;
+    nextDelay = Math.max(minEvolutionDelayMs, Math.min(maxEvolutionDelayMs, Math.round(nextDelay * drift)));
+  }
+  serverEvolution.delayMs = nextDelay;
+  serverEvolution.throttle = {
+    cpuRatio: Number(pressure.cpuRatio.toFixed(3)),
+    memoryRatio: Number(pressure.memoryRatio.toFixed(3)),
+    memoryMb: Math.round(process.memoryUsage().rss / (1024 * 1024)),
+    tickElapsedMs,
+    reason,
+    updatedAt: new Date().toISOString()
+  };
+}
 
 function timestampForFile() {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -589,6 +671,7 @@ function applyServerModelData(data = {}, source = "model") {
   if (champion) serverLab.importChampion(champion);
   if (Array.isArray(data.imageTargets)) serverImageTargets = data.imageTargets;
   serverLab.generation = data.generation || serverLab.generation;
+  enforceServerRuntimeLimits();
   console.log(`Loaded ${source}: generation ${serverLab.generation}, ${serverLab.best().neurons} neurons, ${serverLab.best().synapses} synapses.`);
 }
 
@@ -642,6 +725,8 @@ function serverSnapshot() {
     dreams: serverEvolution.dreams,
     lastDream: serverEvolution.lastDream,
     delayMs: serverEvolution.delayMs,
+    baseDelayMs: serverEvolution.baseDelayMs,
+    throttle: serverEvolution.throttle,
     error: serverEvolution.error,
     savePath: serverModelPath,
     lastGoodPath: serverLastGoodPath,
@@ -653,6 +738,9 @@ function serverSnapshot() {
     curriculumLevel: serverLab.curriculumLevel,
     species: serverLab.species.length,
     population: serverLab.population.length,
+    populationTarget: serverLab.config.populationSize,
+    maxNeurons: global.GenesisEngine.MAX_NEURONS,
+    maxSynapses: global.GenesisEngine.MAX_SYNAPSES,
     neurons: best.neurons,
     synapses: best.synapses,
     vocab: serverLab.vocab.length,
@@ -690,7 +778,11 @@ function applyServerPayload(payload = {}) {
   if (typeof payload.corpus === "string" && payload.corpus.trim()) serverLab.setCorpus(payload.corpus);
   if (payload.champion && !blocksDowngrade) serverLab.importChampion(payload.champion);
   if (blocksDowngrade) serverEvolution.error = `Blocked downgrade sync: incoming ${incomingNeurons} neurons would replace ${currentBest.neurons}.`;
-  if (Number.isFinite(payload.delayMs)) serverEvolution.delayMs = Math.max(20, Math.min(5000, payload.delayMs));
+  enforceServerRuntimeLimits();
+  if (Number.isFinite(payload.delayMs)) {
+    serverEvolution.baseDelayMs = Math.max(50, Math.min(maxEvolutionDelayMs, payload.delayMs));
+    serverEvolution.delayMs = serverEvolution.baseDelayMs;
+  }
   return { blockedDowngrade: blocksDowngrade };
 }
 
@@ -709,7 +801,9 @@ function stopServerEvolution() {
 
 async function serverEvolutionTick() {
   if (!serverEvolution.running) return;
+  const tickStartedAt = Date.now();
   try {
+    enforceServerRuntimeLimits();
     const dialogueText = `${CHAT_PRIMER_TEXT}\n${dialogueTrainingText(`${serverLab.persistentContext}\n${serverLab.corpus}`, serverLab.config.neurons > 1800 ? 900 : 1400)}`;
     serverLab.evolveOnce({
       trainingText: dialogueText,
@@ -737,7 +831,8 @@ async function serverEvolutionTick() {
       coherence: serverLab.best().coherenceScore || 0,
       dialogue: serverLab.best().dialogueScore || 0,
       neurons: serverLab.best().neurons,
-      synapses: serverLab.best().synapses
+      synapses: serverLab.best().synapses,
+      throttle: serverEvolution.throttle
     });
     if (serverEvolution.cycles % 12 === 0) saveServerModel(false);
   } catch (error) {
@@ -746,6 +841,7 @@ async function serverEvolutionTick() {
     saveServerModel(true);
     return;
   }
+  updateAutoThrottle(Date.now() - tickStartedAt);
   setTimeout(serverEvolutionTick, serverEvolution.delayMs);
 }
 

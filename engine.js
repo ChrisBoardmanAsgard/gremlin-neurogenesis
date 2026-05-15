@@ -1,4 +1,10 @@
 (function () {
+  const ENV = (typeof process !== "undefined" && process.env) ? process.env : {};
+  const envNumber = (name, fallback, min, max) => {
+    const value = Number(ENV[name]);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(min, Math.min(max, Math.floor(value)));
+  };
   const DEFAULT_SEED_TEXT = "genesis lab evolves a small local language model from scratch. train it with text and images, then let mutation and selection search for better outputs.";
   const CONTROL_HUMAN = "\u0001";
   const CONTROL_ASSISTANT = "\u0002";
@@ -19,8 +25,8 @@
   const PRINTABLE = `${STRUCTURAL_TOKENS.join("")}abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,;:!?-'\"()[]{}_/\\\n`;
   const PRINTABLE_SET = new Set([...PRINTABLE]);
   const GENOME_SCHEMA_VERSION = 2;
-  const MAX_NEURONS = 20000;
-  const MAX_SYNAPSES = 500000;
+  const MAX_NEURONS = envNumber("MAX_NEURONS", 20000, 64, 20000);
+  const MAX_SYNAPSES = envNumber("MAX_SYNAPSES", 500000, 128, 500000);
   const DEFAULT_VOCAB_SIZE = 768;
   const MAX_VOCAB_SIZE = 4096;
   const MEMORY_SIZE = 48;
