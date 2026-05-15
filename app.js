@@ -64,6 +64,39 @@
     if (el("toolStatus")) el("toolStatus").textContent = message;
   }
 
+  function serializableImageTarget(target) {
+    if (!target) return null;
+    return {
+      name: target.name || "image target",
+      size: target.size || 48,
+      pixels: Array.from(target.pixels || [])
+    };
+  }
+
+  function saveBrowserCheckpoint(reason = "checkpoint") {
+    try {
+      const checkpoint = {
+        format: "genesis-lab-browser-checkpoint-v1",
+        reason,
+        savedAt: new Date().toISOString(),
+        corpus: state.lab.corpus,
+        corpora: state.lab.corpora,
+        persistentContext: state.lab.persistentContext,
+        memoryBank: state.lab.memoryBank,
+        curriculumLevel: state.lab.curriculumLevel,
+        imageTargets: state.imageTargets.map(serializableImageTarget).filter(Boolean),
+        config: state.lab.config,
+        generation: state.lab.generation,
+        champion: state.lab.best().toJSON()
+      };
+      localStorage.setItem("genesis-lab-last-safe-checkpoint", JSON.stringify(checkpoint));
+      return true;
+    } catch (error) {
+      log(`Checkpoint skipped: ${error.message}`);
+      return false;
+    }
+  }
+
   function readConfig() {
     return {
       neurons: clamp(Number(el("neuronInput").value) || 400, 64, MAX_NEURONS),
@@ -344,8 +377,8 @@
   async function evolveStep(imageOptions = {}) {
     syncConfigToLab();
     const imageTargets = state.imageTargets.length ? state.imageTargets : [];
-    if (state.backgroundWorker && !imageOptions.imageTarget && !imageTargets.length && !imageOptions.forceMainThread) {
-      return evolveStepInWorker();
+    if (state.backgroundWorker && !imageOptions.forceMainThread) {
+      return evolveStepInWorker(imageOptions);
     }
     const result = state.lab.evolveOnce({
       imageTarget: imageOptions.imageTarget || null,
@@ -366,15 +399,18 @@
     return result;
   }
 
-  function evolveStepInWorker() {
+  function evolveStepInWorker(imageOptions = {}) {
     if (state.workerBusy) return Promise.resolve({ best: state.lab.best(), elapsed: 0, queued: true });
     state.workerBusy = true;
     const started = performance.now();
     const id = `local-${Date.now().toString(36)}`;
+    const imageTargets = state.imageTargets.map(serializableImageTarget).filter(Boolean);
+    const imageTarget = serializableImageTarget(imageOptions.imageTarget || null);
     return new Promise(resolve => {
       const timeout = setTimeout(() => {
         state.workerBusy = false;
-        resolve(evolveStep({ imageTarget: null, forceMainThread: true }));
+        log("Background worker took too long; pausing this cycle to keep the browser responsive.");
+        resolve({ best: state.lab.best(), elapsed: 0, timeout: true });
       }, 8000);
       state.backgroundWorker.onmessage = event => {
         const payload = event.data || {};
@@ -412,6 +448,10 @@
         config: state.lab.config,
         generation: state.lab.generation,
         champion: state.lab.best().toJSON(),
+        imageTargets,
+        imageTarget,
+        imagePrompt: imageOptions.imagePrompt || el("imagePrompt").value,
+        imageLearningRate: Number(el("imageMutation")?.value || 0.012) * 0.5,
         maxChars: Number(state.lab.config.neurons) > 1800 ? 420 : 760
       });
     });
@@ -556,6 +596,7 @@
     for (const file of files) {
       try {
         if (file.type.startsWith("image/")) {
+          saveBrowserCheckpoint("before-image-import");
           const target = await loadImageTarget(file);
           state.imageTargets.push(target);
           state.lastImageTarget = target;
@@ -739,12 +780,26 @@
     }
     const originalMutation = state.lab.config.mutation;
     state.lab.config.mutation = Number(el("imageMutation").value);
+    saveBrowserCheckpoint("before-image-evolution");
     setStatus("Evolving image");
-    for (let i = 0; i < 6; i++) {
-      await evolveStep({ imageTarget: target, imagePrompt: el("imagePrompt").value });
-      await new Promise(resolve => setTimeout(resolve, 20));
+    const button = el("evolveImageButton");
+    button.disabled = true;
+    try {
+      for (let i = 0; i < 6; i++) {
+        setStatus(`Evolving image ${i + 1}/6`);
+        const result = await evolveStep({ imageTarget: target, imagePrompt: el("imagePrompt").value });
+        if (result?.timeout) break;
+        if (i === 2) saveBrowserCheckpoint("mid-image-evolution");
+        await new Promise(resolve => setTimeout(resolve, 80));
+      }
+    } catch (error) {
+      log(`Image evolution paused safely: ${error.message}`);
+      setStatus("Image paused");
+    } finally {
+      state.lab.config.mutation = originalMutation;
+      button.disabled = false;
+      saveBrowserCheckpoint("after-image-evolution");
     }
-    state.lab.config.mutation = originalMutation;
     renderImage();
     setStatus("Image evolved");
   }

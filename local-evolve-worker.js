@@ -3,6 +3,25 @@ importScripts("engine.js");
 
 const { EvolutionLab } = self.GenesisEngine;
 
+function normalizeImageTargets(targets) {
+  if (!Array.isArray(targets)) return [];
+  return targets.map(target => {
+    const size = Number(target?.size || 48);
+    const rawPixels = target?.pixels?.value || target?.pixels || [];
+    const pixels = Array.isArray(rawPixels)
+      ? rawPixels
+      : ArrayBuffer.isView(rawPixels)
+        ? Array.from(rawPixels)
+        : Object.keys(rawPixels || {}).sort((a, b) => Number(a) - Number(b)).map(key => rawPixels[key]);
+    if (pixels.length < size * size * 4) return null;
+    return {
+      name: String(target.name || "image target"),
+      size,
+      pixels: new Uint8ClampedArray(pixels.slice(0, size * size * 4).map(value => Math.max(0, Math.min(255, Number(value) || 0))))
+    };
+  }).filter(Boolean);
+}
+
 self.onmessage = event => {
   const job = event.data || {};
   if (job.type !== "evolve") return;
@@ -19,7 +38,15 @@ self.onmessage = event => {
     if (Array.isArray(job.corpora)) lab.corpora = job.corpora;
     if (typeof job.persistentContext === "string") lab.persistentContext = job.persistentContext;
     if (job.curriculumLevel) lab.curriculumLevel = job.curriculumLevel;
-    const result = lab.evolveOnce({ maxChars: job.maxChars || 760 });
+    const imageTargets = normalizeImageTargets(job.imageTargets);
+    const imageTarget = normalizeImageTargets(job.imageTarget ? [job.imageTarget] : [])[0] || null;
+    const result = lab.evolveOnce({
+      maxChars: job.maxChars || 760,
+      imageTargets,
+      imageTarget,
+      imagePrompt: job.imagePrompt || imageTarget?.name || "",
+      imageLearningRate: job.imageLearningRate || 0.01
+    });
     self.postMessage({
       ok: true,
       id: job.id,
@@ -30,7 +57,9 @@ self.onmessage = event => {
       curriculumLevel: lab.curriculumLevel,
       config: lab.config,
       historyPoint: lab.history.at(-1),
-      champion: result.best.toJSON()
+      champion: result.best.toJSON(),
+      imageLoss: result.imageLoss,
+      imageTarget: result.imageTarget ? { name: result.imageTarget.name, size: result.imageTarget.size } : null
     });
   } catch (error) {
     self.postMessage({ ok: false, id: job.id, error: error.message });

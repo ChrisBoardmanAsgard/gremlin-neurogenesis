@@ -6,6 +6,7 @@ npm-debug.log*
 data/*.json
 data/backups/
 data/tool-use.log
+render-live-backup-generation-*.json
 
 # Local runtime logs
 *.err.log

@@ -1424,12 +1424,13 @@
       return Array.from(this.visualMemory);
     }
 
-    renderImage(prompt = "", size = 96, latentOverride = null) {
+    renderImage(prompt = "", size = 96, latentOverride = null, options = {}) {
       const dimension = clamp(Math.floor(size), 32, 192);
       const pixels = new Uint8ClampedArray(dimension * dimension * 4);
       const promptSeed = (hashString(prompt) % 10000) / 5000 - 1;
       const latent = latentOverride || this.visualMemory;
-      const active = Math.min(this.neurons, 8000);
+      const defaultActiveLimit = dimension > 128 ? 1600 : dimension > 96 ? 2400 : 3600;
+      const active = Math.min(this.neurons, clamp(Math.floor(options.activeLimit || defaultActiveLimit), 256, 8000));
       let p = 0;
       for (let y = 0; y < dimension; y++) {
         const ny = (y / (dimension - 1)) * 2 - 1;
@@ -1462,7 +1463,7 @@
       if (!target) return 0;
       const latent = extractImageLatent(target);
       this.seeImage(target, 0.12);
-      const rendered = this.renderImage(prompt, target.size, latent);
+      const rendered = this.renderImage(prompt, target.size, latent, { activeLimit: 2200 });
       let loss = 0;
       for (let i = 0; i < rendered.pixels.length; i += 4) {
         const dr = rendered.pixels[i] - target.pixels[i];
@@ -1478,7 +1479,7 @@
     trainImage(target, prompt = "", learningRate = 0.018) {
       if (!target) return 0;
       const latent = extractImageLatent(target);
-      const rendered = this.renderImage(prompt, target.size, latent);
+      const rendered = this.renderImage(prompt, target.size, latent, { activeLimit: 2200 });
       const targetStats = imageAverages(target);
       const renderStats = imageAverages(rendered);
       const er = targetStats.r - renderStats.r;
