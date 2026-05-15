@@ -1,0 +1,15 @@
+node_modules/
+npm-debug.log*
+
+# Local model state and backups can grow quickly. Export a small champion manually
+# if you want to deploy a seed model with the app.
+data/*.json
+data/backups/
+data/tool-use.log
+
+# Local runtime logs
+*.err.log
+*.out.log
+
+# Screenshots captured during local QA
+*.png

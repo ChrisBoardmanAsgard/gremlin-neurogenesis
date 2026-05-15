@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Genesis Lab</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <div>
+            <h1>Genesis Lab</h1>
+            <p>From-scratch evolving neural language and image system</p>
+          </div>
+        </div>
+
+        <nav class="mode-nav" aria-label="Modes">
+          <button class="mode-button active" data-view="train" type="button">
+            <span class="icon">~</span>
+            Training
+          </button>
+          <button class="mode-button" data-view="chat" type="button">
+            <span class="icon">o</span>
+            Chat
+          </button>
+          <button class="mode-button" data-view="image" type="button">
+            <span class="icon">#</span>
+            Image
+          </button>
+          <button class="mode-button" data-view="network" type="button">
+            <span class="icon">*</span>
+            Network
+          </button>
+        </nav>
+
+        <section class="control-block">
+          <div class="block-heading">
+            <span>Organism</span>
+            <strong id="generationLabel">Gen 0</strong>
+          </div>
+          <label>
+            <span>Neurons</span>
+            <input id="neuronInput" type="number" min="64" max="20000" step="16" value="400">
+          </label>
+          <label>
+            <span>Synapses</span>
+            <input id="synapseInput" type="number" min="128" max="500000" step="128" value="1400">
+          </label>
+          <label>
+            <span>Population</span>
+            <input id="populationInput" type="number" min="4" max="24" step="1" value="10">
+          </label>
+          <label>
+            <span>Mutation</span>
+            <input id="mutationInput" type="range" min="0.002" max="0.14" step="0.002" value="0.035">
+          </label>
+          <div class="button-row">
+            <button id="seedButton" type="button">Seed</button>
+            <button id="evolveButton" type="button" class="primary">Evolve</button>
+          </div>
+          <button id="pauseButton" type="button" class="wide subtle">Pause</button>
+        </section>
+
+        <section class="stats-grid" aria-label="Model statistics">
+          <div>
+            <span>Fitness</span>
+            <strong id="fitnessStat">0.000</strong>
+          </div>
+          <div>
+            <span>Corpus</span>
+            <strong id="corpusStat">0 chars</strong>
+          </div>
+          <div>
+            <span>Vocab</span>
+            <strong id="vocabStat">0</strong>
+          </div>
+          <div>
+            <span>Workers</span>
+            <strong id="workerStat">local</strong>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h2 id="viewTitle">Training Console</h2>
+            <p id="viewSubtitle">Import real text and images, then evolve a local sparse neural organism.</p>
+          </div>
+          <div class="status-pill" id="statusPill">Ready</div>
+        </header>
+
+        <section class="view active" id="trainView">
+          <div class="split-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Training Data</h3>
+                <span>Text, Wikipedia, images</span>
+              </div>
+              <div class="stack">
+                <label class="field">
+                  <span>Paste or edit corpus</span>
+                  <textarea id="corpusText" rows="8" spellcheck="false" placeholder="Paste training text here. The model learns character transitions from this corpus."></textarea>
+                </label>
+                <div class="inline-fields">
+                  <label class="field grow">
+                    <span>Wikipedia article title</span>
+                    <input id="wikiTitle" type="text" value="Artificial intelligence">
+                  </label>
+                  <button id="wikiButton" type="button">Import</button>
+                </div>
+                <label class="field">
+                  <span>Full Wikipedia curriculum titles</span>
+                  <textarea id="wikiBatch" rows="4" spellcheck="false" placeholder="One title per line. Full article wikitext is loaded and added as separate corpora."></textarea>
+                </label>
+                <div class="inline-fields">
+                  <label class="field grow">
+                    <span>Corpus name</span>
+                    <input id="corpusName" type="text" value="custom corpus">
+                  </label>
+                  <label class="field">
+                    <span>Difficulty</span>
+                    <input id="corpusDifficulty" type="number" min="1" max="10" step="1" value="1">
+                  </label>
+                  <button id="addCorpusButton" type="button">Add</button>
+                  <button id="wikiBatchButton" type="button">Load full articles</button>
+                </div>
+                <label class="drop-zone" for="fileInput">
+                  <input id="fileInput" type="file" multiple accept=".txt,.md,.json,.csv,.pdf,application/pdf,image/*">
+                  <span>Drop or choose text, PDF, and image files</span>
+                  <small>PDFs are text-extracted on the local server. Images become visual targets.</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Evolution</h3>
+                <span>Genetic search over weights, topology, and image genes</span>
+              </div>
+              <div class="metrics-row">
+                <div class="metric">
+                  <span>Best loss</span>
+                  <strong id="lossMetric">--</strong>
+                </div>
+                <div class="metric">
+                  <span>Best species</span>
+                  <strong id="speciesMetric">--</strong>
+                </div>
+                <div class="metric">
+                  <span>Last cycle</span>
+                  <strong id="cycleMetric">--</strong>
+                </div>
+              </div>
+              <div class="chart-toolbar">
+                <span>Fitness history</span>
+                <button id="resetFitnessButton" type="button">Reset graph</button>
+              </div>
+              <canvas id="fitnessCanvas" width="720" height="220" aria-label="Fitness chart"></canvas>
+              <canvas id="activityCanvas" width="720" height="160" aria-label="Neuron activity visualizer"></canvas>
+              <div class="topology-toolbar">
+                <button id="topologyButton" type="button">Top-down topology</button>
+                <span id="topologyStatus">idle</span>
+              </div>
+              <canvas id="topologyCanvas" width="920" height="520" aria-label="Top-down neural topology visualizer" hidden></canvas>
+              <div class="log" id="trainingLog" aria-live="polite"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="chatView">
+          <section class="panel chat-panel">
+            <div class="panel-heading">
+              <h3>Local Chat Mode</h3>
+              <span id="chatModeStatus">Generated only by this evolving character model</span>
+            </div>
+            <div class="chat-history" id="chatHistory"></div>
+            <div class="tool-status" id="toolStatus">Tool sense idle</div>
+            <div class="chat-input-row">
+              <textarea id="chatPrompt" rows="3" placeholder="Seed the local model with a prompt..."></textarea>
+              <button id="speechButton" type="button">Speak</button>
+              <button id="chatButton" type="button" class="primary">Generate</button>
+            </div>
+            <div class="chat-memory-row">
+              <button id="rememberChatButton" type="button">Remember conversation</button>
+              <div class="personality-readout" id="personalityReadout"></div>
+            </div>
+            <div class="generation-controls">
+              <label>
+                <span>Length</span>
+                <input id="chatLength" type="range" min="80" max="1200" step="20" value="420">
+              </label>
+              <label>
+                <span>Temperature</span>
+                <input id="temperature" type="range" min="0.2" max="1.8" step="0.05" value="0.9">
+              </label>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="imageView">
+          <div class="image-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Image Generation</h3>
+                <span>Neural pattern generator evolved from imported images</span>
+              </div>
+              <label class="field">
+                <span>Image prompt</span>
+                <input id="imagePrompt" type="text" value="bioluminescent neural city">
+              </label>
+              <div class="button-row">
+                <button id="renderImageButton" type="button" class="primary">Render</button>
+                <button id="seeImageButton" type="button">See target</button>
+                <button id="evolveImageButton" type="button">Evolve image</button>
+              </div>
+              <div class="generation-controls compact">
+                <label>
+                  <span>Resolution</span>
+                  <input id="imageSize" type="range" min="48" max="160" step="16" value="96">
+                </label>
+                <label>
+                  <span>Visual mutation</span>
+                  <input id="imageMutation" type="range" min="0.002" max="0.18" step="0.002" value="0.04">
+                </label>
+              </div>
+              <pre class="model-readout compact-readout" id="imageReadout"></pre>
+              <div class="target-strip" id="targetStrip"></div>
+            </section>
+            <section class="image-stage">
+              <canvas id="imageCanvas" width="512" height="512" aria-label="Generated image"></canvas>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="networkView">
+          <div class="split-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Server Evolution</h3>
+                <span>Runs while the Node server stays open</span>
+              </div>
+              <p class="plain-text">Start autopilot to evolve the current corpus and champion on the server, even after this browser tab is closed. The best genome is saved regularly under the app's data folder.</p>
+              <div class="metrics-row">
+                <div class="metric">
+                  <span>Server state</span>
+                  <strong id="serverStateMetric">--</strong>
+                </div>
+                <div class="metric">
+                  <span>Server gen</span>
+                  <strong id="serverGenMetric">--</strong>
+                </div>
+                <div class="metric">
+                  <span>Saved</span>
+                  <strong id="serverSaveMetric">--</strong>
+                </div>
+              </div>
+              <div class="button-row">
+                <button id="serverStartButton" type="button" class="primary">Start 24/7</button>
+                <button id="serverStopButton" type="button">Stop</button>
+              </div>
+              <div class="button-row server-actions">
+                <button id="serverSyncButton" type="button">Send current model</button>
+                <button id="serverPullButton" type="button">Pull server champion</button>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>LAN Workers</h3>
+                <span>Use tabs and devices you own</span>
+              </div>
+              <p class="plain-text">Open the helper page on another tab or machine on your network. It polls this local app for evolution jobs and returns candidate genomes. This is opt-in local compute, not external AI and not unauthorized internet compute.</p>
+              <div class="copy-row">
+                <input id="workerUrl" type="text" readonly>
+                <button id="copyWorkerUrl" type="button">Copy</button>
+              </div>
+              <div class="button-row">
+                <button id="publishJobButton" type="button">Publish job</button>
+                <button id="collectResultsButton" type="button">Collect results</button>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <h3>Model Files</h3>
+                <span>Save, load, and inspect the organism</span>
+              </div>
+              <div class="button-row">
+                <button id="exportButton" type="button">Export model</button>
+                <button id="importButton" type="button">Import model</button>
+              </div>
+              <input id="modelInput" type="file" accept="application/json" hidden>
+              <pre class="model-readout" id="modelReadout"></pre>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="engine.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

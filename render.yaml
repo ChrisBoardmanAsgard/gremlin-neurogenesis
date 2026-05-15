@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: gremlin-neurogenesis
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: AUTO_EVOLVE
+        value: "1"
+      - key: EVOLVE_DELAY_MS
+        value: "1200"

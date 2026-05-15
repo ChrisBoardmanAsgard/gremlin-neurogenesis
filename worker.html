@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Genesis Lab Worker</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <h2>Genesis Worker</h2>
+          <p>This page contributes local browser compute to the Genesis Lab running on your machine.</p>
+        </div>
+        <div class="status-pill" id="workerStatus">Starting</div>
+      </header>
+      <section class="panel">
+        <div class="panel-heading">
+          <h3>Worker Log</h3>
+          <span id="workerId"></span>
+        </div>
+        <div class="log" id="workerLog"></div>
+      </section>
+    </main>
+    <script src="engine.js"></script>
+    <script src="worker.js"></script>
+  </body>
+</html>
