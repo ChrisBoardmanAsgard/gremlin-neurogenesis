@@ -309,9 +309,12 @@
     const memoryMean = Number(activity.memoryMean || 0);
     const memorySaturation = Number(activity.memorySaturation || 0);
     const memoryState = memorySaturation > 0.35 ? "heavy" : memoryMean > 0.22 ? "active" : "light";
+    const noisePressure = Number(activity.noisePressure || 0);
+    const inhibitoryBrake = Number(activity.inhibitoryBrake || 0);
     ctx.fillText(`memory state: ${memoryState} avg ${memoryMean.toFixed(2)} sat ${(memorySaturation * 100).toFixed(0)}%`, 12, 18);
     ctx.fillText(`memory cells: ${memoryLabel}`, 12, 36);
-    ctx.fillText(`species: ${activity.speciesId}`, 12, 54);
+    ctx.fillText(`inhibitor brake: ${inhibitoryBrake.toFixed(2)} noise ${noisePressure.toFixed(2)}`, 12, 54);
+    ctx.fillText(`species: ${activity.speciesId}`, 12, 72);
     maybeLogMemoryPressure(activity);
   }
 
@@ -328,7 +331,7 @@
     if (now - state.lastMemoryPressureLog < 20_000) return;
     state.lastMemoryPressureLog = now;
     if (state.lab?.triggerMemoryRepair) state.lab.triggerMemoryRepair(80);
-    log(`Memory pressure high: ${hotCells.length ? hotCells.map(cell => `m${cell.index}=${cell.pressure.toFixed(2)}`).join(", ") : `sat ${(saturation * 100).toFixed(0)}%`}. Repair-prune bias enabled for ~80 generations.`);
+    log(`Memory pressure high: ${hotCells.length ? hotCells.map(cell => `m${cell.index}=${cell.pressure.toFixed(2)}`).join(", ") : `sat ${(saturation * 100).toFixed(0)}%`}. Inhibitor brake ${(Number(activity.inhibitoryBrake || 0)).toFixed(2)}; repair-prune bias enabled for ~80 generations.`);
   }
 
   function topologyPosition(node, index, count, width, height, tick) {

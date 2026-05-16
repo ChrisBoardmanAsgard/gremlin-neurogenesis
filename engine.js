@@ -1196,10 +1196,37 @@
 
     step(state, memory) {
       const next = new Float32Array(this.neurons);
+      let totalActivity = 0;
+      let highActivity = 0;
+      let inhibitoryActivity = 0;
+      let inhibitoryCount = 0;
       for (let i = 0; i < this.neurons; i++) {
         const type = this.neuronTypes[i] || 0;
+        const activity = Math.abs(state[i]);
+        totalActivity += activity;
+        if (activity > 0.62) highActivity += 1;
+        if (type === 1) {
+          inhibitoryActivity += activity;
+          inhibitoryCount += 1;
+        }
         const decay = type === 4 ? 0.83 : type === 2 ? 0.73 : type === 1 ? 0.61 : 0.68;
         next[i] = state[i] * decay;
+      }
+      const averageActivity = totalActivity / Math.max(1, this.neurons);
+      const saturationRatio = highActivity / Math.max(1, this.neurons);
+      const inhibitoryMean = inhibitoryActivity / Math.max(1, inhibitoryCount);
+      const noisePressure = clamp(averageActivity * 1.15 + saturationRatio * 1.8, 0, 1);
+      const inhibitoryBrake = clamp((noisePressure - 0.28) * 1.35 + inhibitoryMean * 0.22, 0, 0.62);
+      if (inhibitoryBrake > 0.001) {
+        for (let i = 0; i < this.neurons; i++) {
+          const type = this.neuronTypes[i] || 0;
+          if (type === 1) {
+            next[i] = Math.tanh(next[i] + inhibitoryBrake * (state[i] >= 0 ? 0.24 : -0.24));
+          } else {
+            const damp = 1 - inhibitoryBrake * (type === 4 ? 0.28 : type === 2 ? 0.36 : 0.46);
+            next[i] *= damp;
+          }
+        }
       }
       for (let i = 0; i < this.synapses; i++) {
         if (!this.enabled[i]) continue;
@@ -1212,26 +1239,40 @@
         if (sourceType === 1) signal = -Math.abs(signal);
         else if (sourceType === 2) signal *= 0.58 + Math.abs(state[from]) * 0.72;
         else if (sourceType === 5) signal *= 1.12;
+        if (sourceType !== 1 && inhibitoryBrake > 0.001) signal *= 1 - inhibitoryBrake * 0.38;
         if (targetType === 4) signal *= 1.18;
         if (targetType === 1) signal *= 0.84;
         next[to] += signal;
       }
       if (memory) {
+        const memoryWriteBrake = 1 - inhibitoryBrake * 0.58;
+        const memoryKeepBrake = 1 - inhibitoryBrake * 0.34;
+        let memoryMean = 0;
+        let memoryHot = 0;
         for (let m = 0; m < MEMORY_SIZE; m++) {
           const idx = (Math.imul(m + 17, 2654435761) >>> 0) % this.neurons;
           const pressure = Math.abs(memory[m]);
           const candidate = Math.tanh(state[idx] * this.memoryWrite[m] * this.memorySensitivity + this.personality[m % PERSONALITY_SIZE] * 0.14);
           const rawWrite = sigmoid(state[idx] * this.memoryIn[m] * this.memorySensitivity + this.personality[(m + 5) % PERSONALITY_SIZE] * 0.09 - pressure * 0.28) * 0.82;
           const rawKeep = sigmoid(state[idx] * this.memoryForget[m] * 0.62 + 0.2 - pressure * 0.34);
-          const write = Math.tanh(rawWrite * 0.92);
-          const keep = clamp(Math.tanh(rawKeep * 1.05), 0.18, 0.82);
+          const write = Math.tanh(rawWrite * 0.92) * memoryWriteBrake;
+          const keep = clamp(Math.tanh(rawKeep * 1.05) * memoryKeepBrake, 0.14, 0.82);
           const nextMemory = memory[m] * keep + candidate * write * (1 - keep * 0.55);
           memory[m] = clamp(nextMemory * 0.992, -0.92, 0.92);
+          memoryMean += memory[m];
+          if (Math.abs(memory[m]) > 0.72) memoryHot += 1;
           const inject = (Math.imul(m + 31, 1103515245) >>> 0) % this.neurons;
-          next[inject] += memory[m] * (this.neuronTypes[inject] === 4 ? 0.058 : 0.032);
+          next[inject] += memory[m] * (this.neuronTypes[inject] === 4 ? 0.058 : 0.032) * (1 - inhibitoryBrake * 0.42);
+        }
+        if (memoryHot || Math.abs(memoryMean / Math.max(1, MEMORY_SIZE)) > 0.18) {
+          const center = memoryMean / Math.max(1, MEMORY_SIZE);
+          const damp = 1 - Math.min(0.18, memoryHot / Math.max(1, MEMORY_SIZE) * 0.9 + Math.abs(center) * 0.22);
+          for (let m = 0; m < MEMORY_SIZE; m++) memory[m] = clamp((memory[m] - center * 0.18) * damp, -0.9, 0.9);
         }
       }
       for (let i = 0; i < this.neurons; i++) state[i] = Math.tanh(next[i]);
+      this.lastNoisePressure = noisePressure;
+      this.lastInhibitoryBrake = inhibitoryBrake;
     }
 
     hebbianUpdate(previousState, currentState, rate = this.plasticityRate) {
@@ -1715,11 +1756,15 @@
       for (const value of buckets) max = Math.max(max, value);
       const memoryMean = memory.reduce((sum, value) => sum + Math.abs(value), 0) / Math.max(1, memory.length);
       const memorySaturation = memory.reduce((sum, value) => sum + (Math.abs(value) > 0.72 ? 1 : 0), 0) / Math.max(1, memory.length);
+      const inhibitoryCount = this.neuronTypes.reduce((sum, type) => sum + (type === 1 ? 1 : 0), 0);
       return {
         buckets: Array.from(buckets, value => max ? value / max : 0),
         memory: Array.from(memory),
         memoryMean,
         memorySaturation,
+        noisePressure: this.lastNoisePressure || 0,
+        inhibitoryBrake: this.lastInhibitoryBrake || 0,
+        inhibitoryRatio: inhibitoryCount / Math.max(1, this.neurons),
         personality: Array.from(this.personality),
         neuronTypes: NEURON_TYPES.map((name, index) => ({
           name,
@@ -2053,6 +2098,10 @@
         if (genome.enabled[i] && genome.from[i] >= genome.to[i]) recurrentLike += 1;
       }
       const recurrentRatio = recurrentLike / Math.max(1, enabledCount);
+      let inhibitoryCount = 0;
+      for (let i = 0; i < genome.neuronTypes.length; i++) if (genome.neuronTypes[i] === 1) inhibitoryCount += 1;
+      const inhibitoryRatio = inhibitoryCount / Math.max(1, genome.neurons);
+      const inhibitoryBalance = clamp(1 - Math.abs(inhibitoryRatio - 0.18) / 0.18, 0, 1);
       const memoryEnergy = Array.from(genome.memoryIn).reduce((sum, value, index) => {
         return sum + Math.abs(value) + Math.abs(genome.memoryForget[index] || 0) + Math.abs(genome.memoryWrite[index] || 0);
       }, 0) / Math.max(1, genome.memoryIn.length * 3);
@@ -2064,6 +2113,7 @@
         + Math.min(0.1, recurrentRatio * 0.45)
         + Math.min(0.08, enabledRatio * 0.08)
         + Math.min(0.08, memoryEnergy * 0.025)
+        + Math.min(0.045, inhibitoryBalance * 0.045)
         + Math.min(0.14, Math.max(0, genome.selfTuningGain || 0) * 1.6)
         + Math.min(0.08, Math.max(0, genome.embeddingMutationGain || 0) * 0.6);
 
@@ -2082,6 +2132,8 @@
       genome.memoryStabilityBonus = memoryStabilityBonus;
       genome.memoryBalancePenalty = memoryBalancePenalty;
       genome.memoryEnergy = memoryEnergy;
+      genome.inhibitoryRatio = inhibitoryRatio;
+      genome.inhibitoryBalance = inhibitoryBalance;
       const coherenceBonus = Math.min(0.11, Math.max(0, genome.coherenceScore || 0) * 0.11);
       const dialogueBonus = Math.min(0.14, Math.max(0, genome.dialogueScore || 0) * 0.14);
       genome.coherenceBonus = coherenceBonus;
