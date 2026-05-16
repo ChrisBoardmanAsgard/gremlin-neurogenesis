@@ -951,6 +951,11 @@ function applyServerModelData(data = {}, source = "model") {
   }
   if (typeof data.persistentContext === "string") serverLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
   if (Array.isArray(data.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
+  if (Array.isArray(data.history)) {
+    serverLab.history = data.history
+      .filter(point => point && Number.isFinite(point.fitness))
+      .slice(-160);
+  }
   if (Array.isArray(data.corpora)) serverLab.rebuildCurriculumCorpus();
   if (data.curriculumLevel) serverLab.curriculumLevel = data.curriculumLevel;
   if (data.config) serverLab.setConfig(data.config);
@@ -1003,6 +1008,7 @@ function saveServerModel(force = false) {
     imageTargets: serverImageTargets,
     config: serverLab.config,
     generation: serverLab.generation,
+    history: serverLab.history.slice(-160),
     champion: best.toJSON()
   };
   writeAtomicJson(serverModelPath, data);
@@ -1032,6 +1038,7 @@ function serverSnapshot() {
     corpusChars: serverLab.corpus.length,
     imageTargets: serverImageTargets.length,
     corpora: serverLab.corpora.length,
+    history: serverLab.history.length,
     curriculumLevel: serverLab.curriculumLevel,
     species: speciesCount,
     bestSpecies: best.speciesId && best.speciesId !== "unassigned" ? best.speciesId : "s1",
@@ -1075,6 +1082,7 @@ function applyServerPayload(payload = {}) {
   if (Array.isArray(payload.corpora)) serverLab.corpora = payload.corpora;
   if (typeof payload.persistentContext === "string") serverLab.persistentContext = payload.persistentContext;
   if (Array.isArray(payload.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(payload.memoryBank, 240);
+  if (Array.isArray(payload.history)) serverLab.history = payload.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
   if (payload.curriculumLevel) serverLab.curriculumLevel = payload.curriculumLevel;
   if (typeof payload.corpus === "string" && payload.corpus.trim()) serverLab.setCorpus(payload.corpus);
   if (payload.champion && !blocksDowngrade) serverLab.importChampion(payload.champion);
@@ -1112,6 +1120,13 @@ async function serverEvolutionTick() {
       dialogueMaxChars: serverLab.config.neurons > 1800 ? 900 : 1400,
       mutationMultiplier: 1.0,
       scalarMutation: 0.028,
+      distillEvery: 8,
+      distillLearningRate: 0.018,
+      distillPrompts: [
+        "Answer warmly and clearly using memory.",
+        "Explain one thing you learned from the recent context.",
+        "Respond like a coherent local AI organism."
+      ],
       imageTargets: serverImageTargets,
       imagePrompt: serverImageTargets[serverEvolution.cycles % Math.max(1, serverImageTargets.length)]?.name || "",
       imageLearningRate: 0.01,

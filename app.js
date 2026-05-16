@@ -1318,6 +1318,7 @@
       })),
       config: state.lab.config,
       generation: state.lab.generation,
+      history: state.lab.history.slice(-160),
       champion: state.lab.best().toJSON()
     };
     const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
@@ -1358,6 +1359,7 @@
     if (typeof data.persistentContext === "string") nextLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
     if (Array.isArray(data.memoryBank)) nextLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
     if (data.curriculumLevel) nextLab.curriculumLevel = data.curriculumLevel;
+    if (Array.isArray(data.history)) nextLab.history = data.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
     nextLab.setConfig(data.config || {});
     if (Array.isArray(data.corpora)) nextLab.rebuildCurriculumCorpus();
     const genome = nextLab.importChampion(champion, { lazyPopulation: true });
@@ -1474,6 +1476,7 @@
       })),
       config: state.lab.config,
       champion: state.lab.best().toJSON(),
+      history: state.lab.history.slice(-160),
       delayMs: 180
     };
   }
@@ -1549,6 +1552,7 @@
     if (typeof payload.model.persistentContext === "string") state.lab.persistentContext = sanitizePersistentContext(payload.model.persistentContext, 16000);
     if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.model.memoryBank, 240);
     if (payload.model.curriculumLevel) state.lab.curriculumLevel = payload.model.curriculumLevel;
+    if (Array.isArray(payload.model.history)) state.lab.history = payload.model.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
     if (Array.isArray(payload.model.corpora)) state.lab.rebuildCurriculumCorpus();
     state.lab.setConfig(payload.model.config || {});
     const genome = state.lab.importChampion(payload.model.champion, { lazyPopulation: true });

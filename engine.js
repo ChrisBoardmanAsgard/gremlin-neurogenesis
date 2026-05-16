@@ -578,6 +578,8 @@
       this.metadata = { ...(options.metadata || {}) };
       this.metadata.toolUseScore = clamp(Number(this.metadata.toolUseScore ?? this.toolUseScore ?? 0), 0, 1);
       this.toolUseScore = this.metadata.toolUseScore;
+      this.metadata.bestFitness = Math.max(0, Number(this.metadata.bestFitness || options.bestFitness || this.fitness || 0));
+      this.stableFitness = Math.max(0, Number(options.stableFitness || this.metadata.stableFitness || this.fitness || 0));
       this.metadata.dreamCount = Math.max(0, Math.floor(Number(this.metadata.dreamCount ?? options.dreamCount ?? 0)));
       this.dreamCount = this.metadata.dreamCount;
       this.previousFitness = options.previousFitness || 0;
@@ -659,7 +661,8 @@
         growthGain: this.growthGain,
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0 },
+        stableFitness: this.stableFitness || 0,
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -717,7 +720,8 @@
         growthGain: this.growthGain,
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0 },
+        stableFitness: this.stableFitness || 0,
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -1785,6 +1789,12 @@
       const fitter = this.fitness >= partner.fitness ? this : partner;
       const other = fitter === this ? partner : this;
       const child = fitter.clone();
+      const closeFitness = Math.abs((this.fitness || 0) - (partner.fitness || 0)) <= Math.max(0.018, Math.max(this.fitness || 0, partner.fitness || 0) * 0.12);
+      if (closeFitness) {
+        const blendedNeurons = Math.round(fitter.neurons * 0.68 + other.neurons * 0.32 + randomWeight(Math.max(1, fitter.neurons * 0.012)));
+        const blendedSynapses = Math.round(fitter.synapses * 0.7 + other.synapses * 0.3 + randomWeight(Math.max(4, fitter.synapses * 0.015)));
+        child.resize(blendedNeurons, blendedSynapses);
+      }
       const otherByInnovation = new Map();
       for (let i = 0; i < other.innovations.length; i++) otherByInnovation.set(other.innovations[i], i);
       for (let i = 0; i < child.innovations.length; i++) {
@@ -1792,6 +1802,23 @@
         if (otherIndex === undefined || Math.random() >= 0.5) continue;
         child.weights[i] = other.weights[otherIndex];
         child.enabled[i] = Math.random() < 0.75 ? other.enabled[otherIndex] : child.enabled[i];
+      }
+      if (closeFitness && other.synapses > 0) {
+        const childInnovations = new Set(Array.from(child.innovations));
+        let transplanted = 0;
+        const transplantBudget = Math.min(Math.max(2, Math.floor(child.synapses * 0.035)), Math.floor(other.synapses * 0.08));
+        for (let attempts = 0; attempts < transplantBudget * 8 && transplanted < transplantBudget; attempts++) {
+          const source = Math.floor(Math.random() * other.synapses);
+          if (childInnovations.has(other.innovations[source]) || !other.enabled[source]) continue;
+          const target = Math.floor(Math.random() * child.synapses);
+          child.from[target] = other.from[source] % child.neurons;
+          child.to[target] = other.to[source] % child.neurons;
+          child.weights[target] = other.weights[source];
+          child.enabled[target] = other.enabled[source];
+          child.innovations[target] = other.innovations[source];
+          childInnovations.add(other.innovations[source]);
+          transplanted += 1;
+        }
       }
       const blend = (a, b, target) => {
         for (let i = 0; i < target.length; i++) {
@@ -1815,7 +1842,8 @@
       child.recurrentBridgeRate = Math.random() < 0.5 ? fitter.recurrentBridgeRate : (fitter.recurrentBridgeRate + other.recurrentBridgeRate) * 0.5;
       child.memorySensitivity = Math.random() < 0.5 ? fitter.memorySensitivity : (fitter.memorySensitivity + other.memorySensitivity) * 0.5;
       child.toolUseScore = clamp(((fitter.toolUseScore || 0) * 0.7) + ((other.toolUseScore || 0) * 0.3), 0, 1);
-      child.metadata = { ...(child.metadata || {}), toolUseScore: child.toolUseScore };
+      child.stableFitness = Math.max(fitter.stableFitness || 0, other.stableFitness || 0) * 0.985;
+      child.metadata = { ...(child.metadata || {}), toolUseScore: child.toolUseScore, stableFitness: child.stableFitness, bestFitness: Math.max(fitter.metadata?.bestFitness || 0, other.metadata?.bestFitness || 0) * 0.985 };
       for (let i = 0; i < child.neuronTypes.length; i++) {
         if (i < other.neuronTypes.length && Math.random() < 0.32) child.neuronTypes[i] = other.neuronTypes[i];
       }
@@ -1851,6 +1879,14 @@
       this.generation = 0;
       this.history = [];
       this.seed();
+    }
+
+    selectionScore(genome) {
+      if (!genome) return 0;
+      const current = Number.isFinite(genome.fitness) ? genome.fitness : 0;
+      const stable = Number.isFinite(genome.stableFitness) ? genome.stableFitness : 0;
+      const best = Number.isFinite(genome.metadata?.bestFitness) ? genome.metadata.bestFitness : 0;
+      return Math.max(current, stable * 0.992, best * 0.975);
     }
 
     seed() {
@@ -1952,8 +1988,8 @@
         }
       }
       for (const group of species) {
-        group.members.sort((a, b) => b.fitness - a.fitness);
-        group.bestFitness = group.members[0]?.fitness || 0;
+        group.members.sort((a, b) => this.selectionScore(b) - this.selectionScore(a));
+        group.bestFitness = this.selectionScore(group.members[0]);
         for (const member of group.members) member.speciesId = group.id;
       }
       this.species = species;
@@ -2024,6 +2060,10 @@
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
       genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus);
       if (genome.origin === "immigrant" && neuronRatio < 0.55) genome.fitness *= 0.62;
+      genome.stableFitness = clamp(Math.max(genome.fitness, (genome.stableFitness || 0) * 0.992), 0, Math.max(1, genome.fitness * 1.35 + 0.1));
+      genome.metadata = { ...(genome.metadata || {}) };
+      genome.metadata.bestFitness = Math.max(genome.metadata.bestFitness || 0, genome.fitness || 0);
+      genome.metadata.stableFitness = genome.stableFitness;
       return genome.fitness;
     }
 
@@ -2087,7 +2127,7 @@
         }
         this.shapeFitness(genome, fitnessOptions);
       }
-      this.population.sort((a, b) => b.fitness - a.fitness);
+      this.population.sort((a, b) => this.selectionScore(b) - this.selectionScore(a));
       if (dialogueMode && options.dialogueProbe !== false) {
         const probeCount = Math.min(this.population.length, options.dialogueProbeCount || 6);
         const probeReference = trainingText.slice(0, options.dialogueProbeReferenceChars || 1600);
@@ -2095,7 +2135,7 @@
           this.population[i].evaluateCoherence(probeReference, "Answer naturally and usefully in one or two sentences.");
           this.shapeFitness(this.population[i], fitnessOptions);
         }
-        this.population.sort((a, b) => b.fitness - a.fitness);
+        this.population.sort((a, b) => this.selectionScore(b) - this.selectionScore(a));
       }
       const protectedFloor = options.protectScale === false ? 64 : Math.max(64, Math.floor((fitnessOptions.targetNeurons || this.config.neurons) * 0.72));
       const protectedChampion = this.population.find(genome => genome.neurons >= protectedFloor) || this.population[0];
@@ -2136,6 +2176,14 @@
         champion.nudgeTopology(fitnessOptions.targetNeurons, fitnessOptions.targetSynapses, 0.75);
       }
       this.shapeFitness(champion, fitnessOptions);
+      if (options.distill !== false && this.generation % (options.distillEvery || 5) === 0) {
+        this.selfDistillChampion(champion, trainingText, {
+          prompts: options.distillPrompts,
+          maxChars: options.dialogueMaxChars || options.maxChars || 900,
+          learningRate: options.distillLearningRate || Math.min(0.026, (this.config.gradientLearningRate || 0.016) * 1.3)
+        });
+        this.shapeFitness(champion, fitnessOptions);
+      }
 
       const targetPopulationSize = this.population.length < this.config.populationSize
         ? Math.min(this.config.populationSize, this.population.length + (options.populationSpawn || 2))
@@ -2152,9 +2200,9 @@
         }
         const quota = Math.max(1, Math.round((Math.max(0.0001, group.bestFitness) / totalFitness) * targetPopulationSize));
         for (let i = 0; i < quota && next.length < targetPopulationSize; i++) {
-          const parentPool = group.members.slice(0, Math.max(1, Math.ceil(group.members.length * 0.5)));
-          const parentA = parentPool[Math.floor(Math.random() * parentPool.length)];
-          const parentB = parentPool[Math.floor(Math.random() * parentPool.length)] || parentA;
+          const parentPool = group.members.slice(0, Math.max(1, Math.ceil(group.members.length * 0.65)));
+          const parentA = this.tournamentSelect(parentPool);
+          const parentB = this.tournamentSelect(parentPool) || parentA;
           const parent = parentA.crossover(parentB);
           parent.origin = "evolved";
           parent.generation = this.generation + 1;
@@ -2168,8 +2216,8 @@
       }
       while (next.length < targetPopulationSize) {
         const group = species[Math.floor(Math.random() * species.length)] || { members: this.population };
-        const parentA = group.members[Math.floor(Math.random() * group.members.length)];
-        const parentB = group.members[Math.floor(Math.random() * group.members.length)] || parentA;
+        const parentA = this.tournamentSelect(group.members);
+        const parentB = this.tournamentSelect(group.members) || parentA;
         const parent = parentA.crossover(parentB);
         parent.origin = "evolved";
         parent.generation = this.generation + 1;
@@ -2216,6 +2264,58 @@
       }
       this.generation = genome.generation || this.generation;
       return genome;
+    }
+
+    tournamentSelect(pool = [], rounds = 3) {
+      if (!pool.length) return this.best();
+      let winner = pool[Math.floor(Math.random() * pool.length)];
+      for (let i = 1; i < rounds; i++) {
+        const challenger = pool[Math.floor(Math.random() * pool.length)] || winner;
+        if (this.selectionScore(challenger) > this.selectionScore(winner)) winner = challenger;
+      }
+      return winner;
+    }
+
+    selfDistillChampion(champion = this.best(), trainingText = "", options = {}) {
+      if (!champion) return { accepted: 0, bestScore: 0 };
+      const reference = cleanTrainingText(trainingText || this.corpus || DEFAULT_SEED_TEXT, options.maxChars || 1200);
+      const prompts = options.prompts || [
+        "Answer warmly and clearly using memory.",
+        "Explain one thing you learned from the recent context.",
+        "Respond like a coherent local AI organism.",
+        "Use a tool only if outside facts are needed."
+      ];
+      let bestPair = "";
+      let bestScore = 0;
+      const maxPrompts = clamp(Math.floor(options.maxPrompts || 3), 1, 5);
+      const candidatesPerPrompt = clamp(Math.floor(options.candidatesPerPrompt || 2), 1, 3);
+      for (const prompt of prompts.slice(0, maxPrompts)) {
+        for (let i = 0; i < candidatesPerPrompt; i++) {
+          const response = cleanGeneratedText(champion.generate(prompt, 320, 0.55 + i * 0.16), 420);
+          if (!isUsefulTrainingText(response, { minQuality: 0.54, minEntropy: 0.45, minDialogue: 0.42, minLength: 36, maxOneLetterRatio: 0.18 })) continue;
+          const score = chatQualityScore(response) * 0.36
+            + naturalDialogueScore(response) * 0.3
+            + coherenceScore(response, reference) * 0.22
+            + Math.min(1, Math.log(1 + response.length) / 6) * 0.12;
+          if (score > bestScore) {
+            bestScore = score;
+            bestPair = formatDialoguePair(prompt, response);
+          }
+        }
+      }
+      if (!bestPair || bestScore < 0.48) return { accepted: 0, bestScore };
+      champion.adaptDialogue(bestPair, options.learningRate || 0.018, options.maxChars || 900);
+      const tuned = champion.gradientFineTune(bestPair, {
+        dialogueMode: true,
+        steps: options.steps || 1,
+        learningRate: options.learningRate || 0.018,
+        maxTokens: options.maxTokens || 280
+      });
+      champion.evaluateDialogue(`${CHAT_PRIMER_TEXT}\n${bestPair}`, options.maxChars || 900);
+      champion.evaluateCoherence(`${reference}\n${bestPair}`, "Answer naturally from a useful memory.");
+      champion.selfTuningGain = clamp((champion.selfTuningGain || 0) * 0.96 + bestScore * 0.025, 0, 0.5);
+      this.remember(`Self-distilled dialogue score ${bestScore.toFixed(2)}: ${bestPair}`);
+      return { accepted: 1, bestScore, tuned };
     }
 
     injectImmigrants(count = 4, seedNeurons = 400) {
