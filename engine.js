@@ -134,6 +134,61 @@
     return cleaned;
   }
 
+  function textNoiseRatio(text) {
+    const raw = String(text || "");
+    if (!raw) return 1;
+    let noisy = 0;
+    for (const char of raw) {
+      const code = char.charCodeAt(0);
+      const allowedControl = char === CONTROL_HUMAN || char === CONTROL_ASSISTANT || char === CONTROL_TURN_END || char === "\n" || char === "\t" || char === "\r";
+      if (code === 0xfffd || (!allowedControl && code < 0x20)) noisy += 1;
+    }
+    return noisy / Math.max(1, raw.length);
+  }
+
+  function isUsefulTrainingText(text, options = {}) {
+    if (/u000[123]|\\u000[123]/i.test(String(text || ""))) return false;
+    const cleaned = cleanGeneratedText(text, options.maxLength ?? 2400);
+    if (cleaned.length < (options.minLength ?? 24)) return false;
+    if (textNoiseRatio(text) > (options.maxNoise ?? 0.012)) return false;
+    const quality = chatQualityScore(cleaned);
+    const entropy = textEntropy(cleaned);
+    const dialogue = naturalDialogueScore(cleaned);
+    const words = cleaned.match(/[A-Za-z']+/g) || [];
+    const oneLetterRatio = words.filter(word => word.length === 1).length / Math.max(1, words.length);
+    const longClumps = words.filter(word => /[bcdfghjklmnpqrstvwxyz]{5,}/i.test(word)).length / Math.max(1, words.length);
+    return quality >= (options.minQuality ?? 0.42)
+      && entropy >= (options.minEntropy ?? 0.42)
+      && dialogue >= (options.minDialogue ?? 0.32)
+      && oneLetterRatio <= (options.maxOneLetterRatio ?? 0.28)
+      && longClumps <= (options.maxClumpRatio ?? 0.16);
+  }
+
+  function sanitizePersistentContext(text, maxLength = 16000) {
+    const cleaned = cleanTrainingText(text, maxLength * 2);
+    if (!cleaned) return "";
+    const blocks = cleaned
+      .split(/(?=\b(?:User|Human|NeuroGenesis|Genesis|Assistant):)/g)
+      .map(block => block.trim())
+      .filter(Boolean);
+    const kept = [];
+    for (const block of blocks.length ? blocks : cleaned.split(/\n+/)) {
+      const safeFallback = /I am still stabilizing my chat vocabulary|Hey\. I am awake|ready to train|Dream phase complete/i.test(block);
+      const isUserOnly = /^(User|Human):\s*.{1,120}$/i.test(block) && !/\b(NeuroGenesis|Genesis|Assistant):/i.test(block);
+      if (safeFallback || isUserOnly || isUsefulTrainingText(block, { minQuality: 0.38, minEntropy: 0.36, minDialogue: 0.24, minLength: 12 })) {
+        kept.push(block.slice(0, 1200));
+      }
+    }
+    return kept.join("\n").slice(-maxLength);
+  }
+
+  function sanitizeMemoryBank(memoryBank, limit = 180) {
+    if (!Array.isArray(memoryBank)) return [];
+    return memoryBank
+      .filter(item => item && isUsefulTrainingText(item.text || "", { minQuality: 0.36, minEntropy: 0.34, minDialogue: 0.22, minLength: 12 }))
+      .slice(-limit);
+  }
+
   function formatDialoguePair(human, assistant) {
     return `${CONTROL_HUMAN} ${cleanTrainingText(human, 1200)} ${CONTROL_ASSISTANT} ${cleanTrainingText(assistant, 2400)} ${CONTROL_TURN_END}`;
   }
@@ -2023,7 +2078,8 @@
     remember(text) {
       if (!text || !text.trim()) return;
       const cleaned = cleanTrainingText(text, 4000);
-      this.persistentContext = `${this.persistentContext}\n${cleaned}`.trim().slice(-16000);
+      if (!isUsefulTrainingText(cleaned, { minQuality: 0.3, minEntropy: 0.28, minDialogue: 0.18, minLength: 8 })) return;
+      this.persistentContext = sanitizePersistentContext(`${this.persistentContext}\n${cleaned}`, 16000);
       const keywords = Array.from(keywordSet(cleaned, 24));
       if (cleaned && keywords.length) {
         this.memoryBank.push({
@@ -2032,7 +2088,7 @@
           keywords,
           strength: 1
         });
-        if (this.memoryBank.length > 180) this.memoryBank = this.memoryBank.slice(-180);
+        this.memoryBank = sanitizeMemoryBank(this.memoryBank, 180);
       }
     }
 
@@ -2147,6 +2203,9 @@
     hashString,
     cleanTrainingText,
     cleanGeneratedText,
+    isUsefulTrainingText,
+    sanitizePersistentContext,
+    sanitizeMemoryBank,
     dialogueTrainingText,
     formatDialoguePair,
     chatQualityScore,

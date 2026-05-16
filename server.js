@@ -30,7 +30,7 @@ const serverModelPath = path.join(dataDir, "server-model.json");
 const serverLastGoodPath = path.join(dataDir, "server-model.last-good.json");
 const toolLogPath = path.join(dataDir, "tool-use.log");
 const bundledSeedModelPath = path.join(root, "genesis-lab-generation-3431.json");
-const { EvolutionLab, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, cleanGeneratedText, cleanTrainingText, dialogueTrainingText, chatQualityScore, textEntropy, naturalDialogueScore } = global.GenesisEngine;
+const { EvolutionLab, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, cleanGeneratedText, cleanTrainingText, dialogueTrainingText, chatQualityScore, textEntropy, naturalDialogueScore, isUsefulTrainingText, sanitizePersistentContext, sanitizeMemoryBank } = global.GenesisEngine;
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -591,6 +591,9 @@ async function rewardToolUseProbe() {
 }
 
 function scoreSelfGeneratedPair(prompt, response) {
+  if (!isUsefulTrainingText(response, { minQuality: 0.58, minEntropy: 0.5, minDialogue: 0.48, minLength: 48, maxOneLetterRatio: 0.18 })) {
+    return { score: 0, quality: 0, dialogue: 0, entropy: 0, lengthScore: 0, novelty: 0, rejected: true };
+  }
   const quality = chatQualityScore(response);
   const entropy = textEntropy(response);
   const dialogue = naturalDialogueScore(response);
@@ -602,6 +605,7 @@ function scoreSelfGeneratedPair(prompt, response) {
 
 function runSelfGeneratedDataLoop() {
   if (serverEvolution.cycles % 18 !== 0) return 0;
+  if ((serverLab.best().coherenceScore || 0) < 0.48 && (serverLab.best().dialogueScore || 0) < 0.48) return 0;
   const prompts = [
     "Explain what you remember about this training run.",
     "Give a helpful answer about local evolving neural organisms.",
@@ -628,6 +632,7 @@ function runSelfGeneratedDataLoop() {
   const accepted = candidates.slice(0, 3);
   for (const item of accepted) {
     const pair = `${CONTROL_HUMAN} ${item.prompt} ${CONTROL_ASSISTANT} ${item.response} ${CONTROL_TURN_END}`;
+    if (!isUsefulTrainingText(pair, { minQuality: 0.56, minEntropy: 0.48, minDialogue: 0.42, minLength: 60, maxOneLetterRatio: 0.18 })) continue;
     serverLab.addCorpus(`self-generated-${Date.now()}`, pair, Math.min(10, serverLab.curriculumLevel + 1));
     serverLab.remember(`Self-generated training pair score ${item.score.toFixed(2)}, entropy ${item.entropy.toFixed(2)}: ${item.prompt}\n${item.response}`);
     serverLab.best().fitness += Math.min(0.025, item.score * 0.01);
@@ -660,11 +665,40 @@ function runDreamPhase() {
   return result;
 }
 
+function sanitizeLoadedCorpora(corpora = []) {
+  let quarantined = 0;
+  const clean = [];
+  for (const corpus of corpora) {
+    if (!corpus || typeof corpus.text !== "string") {
+      quarantined += 1;
+      continue;
+    }
+    const isSelfGenerated = /self-generated/i.test(corpus.name || "");
+    const assistantText = isSelfGenerated && corpus.text.includes(CONTROL_ASSISTANT)
+      ? corpus.text.split(CONTROL_ASSISTANT).slice(1).join(" ").split(CONTROL_TURN_END)[0]
+      : corpus.text;
+    if (isSelfGenerated && !isUsefulTrainingText(assistantText, { minQuality: 0.56, minEntropy: 0.46, minDialogue: 0.42, minLength: 48, maxOneLetterRatio: 0.16 })) {
+      quarantined += 1;
+      continue;
+    }
+    clean.push({ ...corpus, text: cleanTrainingText(corpus.text, 1_200_000) });
+  }
+  return { corpora: clean, quarantined };
+}
+
 function applyServerModelData(data = {}, source = "model") {
   if (data.corpus) serverLab.setCorpus(data.corpus);
-  if (Array.isArray(data.corpora)) serverLab.corpora = data.corpora;
-  if (typeof data.persistentContext === "string") serverLab.persistentContext = data.persistentContext;
-  if (Array.isArray(data.memoryBank)) serverLab.memoryBank = data.memoryBank.slice(-180);
+  if (Array.isArray(data.corpora)) {
+    const clean = sanitizeLoadedCorpora(data.corpora);
+    serverLab.corpora = clean.corpora;
+    if (clean.quarantined) {
+      serverEvolution.error = `Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) while loading ${source}.`;
+      console.warn(serverEvolution.error);
+    }
+  }
+  if (typeof data.persistentContext === "string") serverLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
+  if (Array.isArray(data.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 180);
+  if (Array.isArray(data.corpora)) serverLab.rebuildCurriculumCorpus();
   if (data.curriculumLevel) serverLab.curriculumLevel = data.curriculumLevel;
   if (data.config) serverLab.setConfig(data.config);
   const champion = data.champion || data.genome || (data.neurons && data.synapses ? data : null);
@@ -697,14 +731,21 @@ function loadServerModel() {
 function saveServerModel(force = false) {
   const now = Date.now();
   if (!force && now - serverEvolution.lastSavedAt < 30_000) return;
+  const clean = sanitizeLoadedCorpora(serverLab.corpora);
+  if (clean.quarantined) {
+    serverLab.corpora = clean.corpora;
+    serverLab.persistentContext = sanitizePersistentContext(serverLab.persistentContext, 16000);
+    serverLab.memoryBank = sanitizeMemoryBank(serverLab.memoryBank, 180);
+    serverLab.rebuildCurriculumCorpus();
+  }
   const best = serverLab.best();
   const data = {
     format: "genesis-lab-server-model-v1",
     savedAt: new Date().toISOString(),
     corpus: serverLab.corpus,
     corpora: serverLab.corpora,
-    persistentContext: serverLab.persistentContext,
-    memoryBank: serverLab.memoryBank,
+    persistentContext: sanitizePersistentContext(serverLab.persistentContext, 16000),
+    memoryBank: sanitizeMemoryBank(serverLab.memoryBank, 180),
     curriculumLevel: serverLab.curriculumLevel,
     imageTargets: serverImageTargets,
     config: serverLab.config,
@@ -977,7 +1018,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (url.pathname === "/api/status") {
+    if (url.pathname === "/api/status" || url.pathname === "/api/server/status") {
       const now = Date.now();
       for (const [id, seen] of workerSeen.entries()) {
         if (now - seen > 45_000) workerSeen.delete(id);

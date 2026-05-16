@@ -1,5 +1,5 @@
 (function () {
-  const { EvolutionLab, NeuralGenome, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, MAX_NEURONS, MAX_SYNAPSES, DEFAULT_VOCAB_SIZE, clamp, cleanGeneratedText, chatQualityScore } = window.GenesisEngine;
+  const { EvolutionLab, NeuralGenome, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, MAX_NEURONS, MAX_SYNAPSES, DEFAULT_VOCAB_SIZE, clamp, cleanGeneratedText, chatQualityScore, isUsefulTrainingText, sanitizePersistentContext, sanitizeMemoryBank } = window.GenesisEngine;
 
   const el = id => document.getElementById(id);
   const state = {
@@ -78,6 +78,23 @@
     setStatus("Ready to train");
     log("ready to train");
     syncTrainingControls();
+  }
+
+  function sanitizeCorpora(corpora = []) {
+    let quarantined = 0;
+    const cleaned = [];
+    for (const corpus of corpora || []) {
+      const isSelfGenerated = /self-generated/i.test(corpus?.name || "");
+      const assistantText = isSelfGenerated && String(corpus?.text || "").includes(CONTROL_ASSISTANT)
+        ? String(corpus.text).split(CONTROL_ASSISTANT).slice(1).join(" ").split(CONTROL_TURN_END)[0]
+        : corpus?.text || "";
+      if (isSelfGenerated && !isUsefulTrainingText(assistantText, { minQuality: 0.56, minEntropy: 0.46, minDialogue: 0.42, minLength: 48, maxOneLetterRatio: 0.16 })) {
+        quarantined += 1;
+        continue;
+      }
+      if (corpus?.text) cleaned.push(corpus);
+    }
+    return { corpora: cleaned, quarantined };
   }
 
   function serializableImageTarget(target) {
@@ -409,6 +426,7 @@
       let result = null;
       let traces = 0;
       for (let epoch = 1; epoch <= epochs; epoch++) {
+        const epochStarted = performance.now();
         log(`${spinner[(epoch - 1) % spinner.length]} Dreaming... (${epoch}/${epochs} epochs)`);
         result = state.lab.dreamReplay({
           count: epochs >= 25 ? 14 : epochs >= 12 ? 10 : 6,
@@ -422,6 +440,10 @@
         });
         traces += result.dreamed || 0;
         if (epoch % 3 === 0 || epoch === epochs) updateReadout();
+        if (performance.now() - epochStarted > 3500) {
+          log("Dream phase auto-paused early to keep the browser responsive.");
+          break;
+        }
         await new Promise(resolve => setTimeout(resolve, 20));
       }
       saveBrowserCheckpoint("after-manual-dream");
@@ -712,9 +734,9 @@
     }
   }
 
-  function restoreImageTargets(targets) {
-    if (!Array.isArray(targets)) return;
-    state.imageTargets = targets
+  function normalizeImageTargets(targets) {
+    if (!Array.isArray(targets)) return [];
+    return targets
       .map(target => {
         const size = Number(target.size) || 48;
         const rawPixels = target.pixels?.value || target.pixels || [];
@@ -731,6 +753,10 @@
         };
       })
       .filter(Boolean);
+  }
+
+  function restoreImageTargets(targets) {
+    state.imageTargets = normalizeImageTargets(targets);
     state.lastImageTarget = state.imageTargets.at(-1) || null;
     renderTargets();
   }
@@ -900,9 +926,9 @@
       format: "genesis-lab-genome-v1",
       exportedAt: new Date().toISOString(),
       corpus: state.lab.corpus,
-      corpora: state.lab.corpora,
-      persistentContext: state.lab.persistentContext,
-      memoryBank: state.lab.memoryBank,
+      corpora: sanitizeCorpora(state.lab.corpora).corpora,
+      persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
+      memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 180),
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
         name: target.name,
@@ -933,17 +959,42 @@
     const data = JSON.parse(text);
     const champion = data.champion || data.genome || (data.neurons && data.synapses ? data : null);
     if (!champion) throw new Error("No champion genome found");
-    el("corpusText").value = data.corpus || el("corpusText").value;
-    state.lab.setCorpus(el("corpusText").value);
-    if (Array.isArray(data.corpora)) state.lab.corpora = data.corpora;
-    if (typeof data.persistentContext === "string") state.lab.persistentContext = data.persistentContext;
-    if (Array.isArray(data.memoryBank)) state.lab.memoryBank = data.memoryBank.slice(-180);
-    if (data.curriculumLevel) state.lab.curriculumLevel = data.curriculumLevel;
-    state.lab.setConfig(data.config || {});
-    const genome = state.lab.importChampion(champion, { lazyPopulation: true });
-    restoreImageTargets(data.imageTargets);
+    const nextLab = new EvolutionLab();
+    nextLab.setCorpus(data.corpus || el("corpusText").value || DEFAULT_SEED_TEXT);
+    if (Array.isArray(data.corpora)) {
+      const clean = sanitizeCorpora(data.corpora);
+      nextLab.corpora = clean.corpora.length ? clean.corpora : nextLab.corpora;
+      if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) during import.`);
+    }
+    if (typeof data.persistentContext === "string") nextLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
+    if (Array.isArray(data.memoryBank)) nextLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 180);
+    if (data.curriculumLevel) nextLab.curriculumLevel = data.curriculumLevel;
+    nextLab.setConfig(data.config || {});
+    if (Array.isArray(data.corpora)) nextLab.rebuildCurriculumCorpus();
+    const genome = nextLab.importChampion(champion, { lazyPopulation: true });
+    if (!genome.neurons || !genome.synapses || !genome.vocab?.length) throw new Error("Champion genome failed validation");
+    const importedImageTargets = normalizeImageTargets(data.imageTargets);
+    state.evolving = false;
+    state.workerBusy = false;
+    if (state.backgroundWorker) {
+      state.backgroundWorker.terminate();
+      state.backgroundWorker = null;
+    }
+    if (location.protocol !== "file:") {
+      try {
+        state.backgroundWorker = new Worker("local-evolve-worker.js");
+      } catch (error) {
+        log(`Background worker restart skipped after import: ${error.message}`);
+      }
+    }
+    state.lab = nextLab;
+    el("corpusText").value = state.lab.corpus;
+    state.imageTargets = importedImageTargets;
+    state.lastImageTarget = state.imageTargets.at(-1) || null;
+    renderTargets();
     el("modelInput").value = "";
     log(`Imported model: generation ${genome.generation}, ${genome.neurons} neurons, ${genome.synapses} synapses. Population will refill gradually during evolution.`);
+    syncTrainingControls();
     updateReadout();
     renderImage();
   }
@@ -1022,8 +1073,9 @@
     syncConfigToLab();
     return {
       corpus: state.lab.corpus,
-      corpora: state.lab.corpora,
-      persistentContext: state.lab.persistentContext,
+      corpora: sanitizeCorpora(state.lab.corpora).corpora,
+      persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
+      memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 180),
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
         name: target.name,
@@ -1085,10 +1137,15 @@
       state.lab.corpus = payload.model.corpus;
       el("corpusText").value = payload.model.corpus;
     }
-    if (Array.isArray(payload.model.corpora)) state.lab.corpora = payload.model.corpora;
-    if (typeof payload.model.persistentContext === "string") state.lab.persistentContext = payload.model.persistentContext;
-    if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = payload.model.memoryBank.slice(-180);
+    if (Array.isArray(payload.model.corpora)) {
+      const clean = sanitizeCorpora(payload.model.corpora);
+      state.lab.corpora = clean.corpora;
+      if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) from the server pull.`);
+    }
+    if (typeof payload.model.persistentContext === "string") state.lab.persistentContext = sanitizePersistentContext(payload.model.persistentContext, 16000);
+    if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.model.memoryBank, 180);
     if (payload.model.curriculumLevel) state.lab.curriculumLevel = payload.model.curriculumLevel;
+    if (Array.isArray(payload.model.corpora)) state.lab.rebuildCurriculumCorpus();
     state.lab.setConfig(payload.model.config || {});
     const genome = state.lab.importChampion(payload.model.champion, { lazyPopulation: true });
     restoreImageTargets(payload.model.imageTargets);
@@ -1211,7 +1268,13 @@
     el("exportButton").addEventListener("click", exportModel);
     el("importButton").addEventListener("click", () => el("modelInput").click());
     el("modelInput").addEventListener("change", event => {
-      if (event.target.files[0]) importModel(event.target.files[0]).catch(error => log(`Import failed: ${error.message}`));
+      if (event.target.files[0]) {
+        importModel(event.target.files[0])
+          .catch(error => log(`Import failed: ${error.message}`))
+          .finally(() => {
+            event.target.value = "";
+          });
+      }
     });
     el("publishJobButton").addEventListener("click", publishJob);
     el("collectResultsButton").addEventListener("click", collectResults);
