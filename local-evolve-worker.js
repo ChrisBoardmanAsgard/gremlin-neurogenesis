@@ -25,15 +25,17 @@ function normalizeImageTargets(targets) {
 self.onmessage = event => {
   const job = event.data || {};
   if (job.type !== "evolve") return;
+  const started = performance.now();
   try {
     const lab = new EvolutionLab({
       corpus: job.corpus,
       corpora: job.corpora,
       persistentContext: job.persistentContext,
       curriculumLevel: job.curriculumLevel,
-      ...job.config
+      ...(job.workerConfig || job.config)
     });
-    if (job.champion) lab.importChampion(job.champion);
+    if (job.champion) lab.importChampion(job.champion, { lazyPopulation: true });
+    if (job.workerConfig) lab.setConfig(job.workerConfig);
     lab.generation = job.generation || lab.generation;
     if (Array.isArray(job.corpora)) lab.corpora = job.corpora;
     if (typeof job.persistentContext === "string") lab.persistentContext = job.persistentContext;
@@ -42,22 +44,30 @@ self.onmessage = event => {
     const imageTarget = normalizeImageTargets(job.imageTarget ? [job.imageTarget] : [])[0] || null;
     const result = lab.evolveOnce({
       maxChars: job.maxChars || 760,
+      dialogueMaxChars: job.dialogueMaxChars || job.maxChars || 760,
+      gradientSteps: job.gradientSteps ?? lab.config.gradientSteps,
+      gradientMaxTokens: job.gradientMaxTokens,
+      populationSpawn: job.populationSpawn || 1,
+      dialogueProbe: job.dialogueProbe,
+      dialogueProbeCount: job.dialogueProbeCount,
       imageTargets,
       imageTarget,
       imagePrompt: job.imagePrompt || imageTarget?.name || "",
       imageLearningRate: job.imageLearningRate || 0.01
     });
+    const elapsed = Math.round(performance.now() - started);
     self.postMessage({
       ok: true,
       id: job.id,
+      elapsed,
       generation: lab.generation,
       corpus: lab.corpus,
       corpora: lab.corpora,
       persistentContext: lab.persistentContext,
       curriculumLevel: lab.curriculumLevel,
-      config: lab.config,
+      config: job.config || lab.config,
       historyPoint: lab.history.at(-1),
-      champion: result.best.toJSON(),
+      champion: result.best.toCompactJSON(),
       imageLoss: result.imageLoss,
       imageTarget: result.imageTarget ? { name: result.imageTarget.name, size: result.imageTarget.size } : null
     });

@@ -10,6 +10,9 @@
     lastCycleAt: 0,
     backgroundWorker: null,
     workerBusy: false,
+    workerTimeoutMs: 14000,
+    workerTimeouts: 0,
+    workerCooldownUntil: 0,
     ws: null,
     serverChatAvailable: false,
     topologyActive: false,
@@ -505,19 +508,59 @@
     return result;
   }
 
+  function workerBudget() {
+    const best = state.lab.best();
+    const neurons = Number(best?.neurons || state.lab.config.neurons || 400);
+    const synapses = Number(best?.synapses || state.lab.config.synapses || 1400);
+    const large = neurons > 6500 || synapses > 20000;
+    const huge = neurons > 9000 || synapses > 60000;
+    return {
+      timeoutMs: clamp(12000 + Math.floor(neurons / 1000) * 2200 + Math.floor(synapses / 25000) * 1400, 12000, 45000),
+      maxChars: huge ? 180 : large ? 260 : neurons > 1800 ? 360 : 620,
+      dialogueMaxChars: huge ? 220 : large ? 320 : neurons > 1800 ? 420 : 760,
+      gradientSteps: huge ? 0 : 1,
+      gradientMaxTokens: huge ? 96 : large ? 140 : 220,
+      populationSize: huge ? 3 : large ? 4 : 6,
+      populationSpawn: 1,
+      dialogueProbe: !huge,
+      dialogueProbeCount: large ? 2 : 4,
+      imageTargetLimit: huge ? 1 : 2
+    };
+  }
+
+  function restartBackgroundWorker(reason = "restart") {
+    if (state.backgroundWorker) {
+      state.backgroundWorker.terminate();
+      state.backgroundWorker = null;
+    }
+    state.workerBusy = false;
+    if (location.protocol === "file:") return;
+    try {
+      state.backgroundWorker = new Worker("local-evolve-worker.js");
+      log(`Background worker ${reason}; resumed optimized worker mode.`);
+    } catch (error) {
+      log(`Background worker restart failed: ${error.message}`);
+    }
+  }
+
   function evolveStepInWorker(imageOptions = {}) {
     if (state.workerBusy) return Promise.resolve({ best: state.lab.best(), elapsed: 0, queued: true });
+    if (Date.now() < state.workerCooldownUntil) return Promise.resolve({ best: state.lab.best(), elapsed: 0, coolingDown: true });
     state.workerBusy = true;
     const started = performance.now();
     const id = `local-${Date.now().toString(36)}`;
-    const imageTargets = state.imageTargets.map(serializableImageTarget).filter(Boolean);
+    const budget = workerBudget();
+    const recentTargets = state.imageTargets.slice(-budget.imageTargetLimit);
+    const imageTargets = recentTargets.map(serializableImageTarget).filter(Boolean);
     const imageTarget = serializableImageTarget(imageOptions.imageTarget || null);
     return new Promise(resolve => {
       const timeout = setTimeout(() => {
-        state.workerBusy = false;
-        log("Background worker took too long; pausing this cycle to keep the browser responsive.");
+        state.workerTimeouts += 1;
+        state.workerCooldownUntil = Date.now() + Math.min(15000, 2500 * state.workerTimeouts);
+        restartBackgroundWorker("timed out");
+        log(`Background worker took too long (${Math.round(budget.timeoutMs / 1000)}s budget); restarted with a short cooldown.`);
         resolve({ best: state.lab.best(), elapsed: 0, timeout: true });
-      }, 8000);
+      }, budget.timeoutMs);
       state.backgroundWorker.onmessage = event => {
         const payload = event.data || {};
         if (payload.id !== id) return;
@@ -528,12 +571,14 @@
           resolve({ best: state.lab.best(), elapsed: 0 });
           return;
         }
+        state.workerTimeouts = Math.max(0, state.workerTimeouts - 1);
+        state.workerTimeoutMs = Math.round(state.workerTimeoutMs * 0.7 + Math.max(12000, payload.elapsed * 2.5) * 0.3);
         state.lab.corpus = payload.corpus;
         state.lab.corpora = payload.corpora;
         state.lab.persistentContext = payload.persistentContext || "";
         state.lab.curriculumLevel = payload.curriculumLevel || state.lab.curriculumLevel;
         state.lab.setConfig(payload.config || {});
-        const champion = state.lab.importChampion(payload.champion);
+        const champion = state.lab.importChampion(payload.champion, { lazyPopulation: true });
         state.lab.generation = payload.generation;
         if (payload.historyPoint) state.lab.history.push(payload.historyPoint);
         if (state.lab.history.length > 160) state.lab.history.shift();
@@ -553,12 +598,23 @@
         curriculumLevel: state.lab.curriculumLevel,
         config: state.lab.config,
         generation: state.lab.generation,
-        champion: state.lab.best().toJSON(),
+        champion: state.lab.best().toCompactJSON(),
+        workerConfig: {
+          ...state.lab.config,
+          populationSize: budget.populationSize,
+          gradientSteps: budget.gradientSteps
+        },
         imageTargets,
         imageTarget,
         imagePrompt: imageOptions.imagePrompt || el("imagePrompt").value,
         imageLearningRate: Number(el("imageMutation")?.value || 0.012) * 0.5,
-        maxChars: Number(state.lab.config.neurons) > 1800 ? 420 : 760
+        maxChars: budget.maxChars,
+        dialogueMaxChars: budget.dialogueMaxChars,
+        gradientSteps: budget.gradientSteps,
+        gradientMaxTokens: budget.gradientMaxTokens,
+        populationSpawn: budget.populationSpawn,
+        dialogueProbe: budget.dialogueProbe,
+        dialogueProbeCount: budget.dialogueProbeCount
       });
     });
   }
@@ -568,7 +624,10 @@
     setStatus("Evolving");
     await new Promise(resolve => setTimeout(resolve, 20));
     try {
-      await evolveStep();
+      const result = await evolveStep();
+      if (result?.timeout || result?.coolingDown || result?.queued) {
+        await new Promise(resolve => setTimeout(resolve, result.timeout ? 1200 : 260));
+      }
     } catch (error) {
       log(`Evolution stopped: ${error.message}`);
       state.evolving = false;
