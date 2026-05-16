@@ -207,6 +207,22 @@
     return clamp(quality * 0.28 + dialogue * 0.28 + entropy * 0.18 + human * 0.18 + Math.min(1, cleaned.length / 260) * 0.08 - contamination * 0.35 - repetition * 0.28, 0, 1);
   }
 
+  function calculateLinguisticFitness(generatedTokens) {
+    const text = Array.isArray(generatedTokens)
+      ? generatedTokens.map(token => typeof token === "string" ? token : "").join("")
+      : cleanGeneratedText(generatedTokens || "", 2400);
+    const cleaned = cleanGeneratedText(text, 2400);
+    if (!cleaned) return 0;
+    const words = cleaned.toLowerCase().match(/[a-z0-9']+/g) || [];
+    const uniqueRatio = new Set(words).size / Math.max(1, words.length);
+    const lengthScore = Math.min(1, cleaned.length / 360);
+    const punctuationScore = Math.min(1, (cleaned.match(/[.!?]/g) || []).length / 4);
+    const natural = naturalDialogueScore(cleaned);
+    const repetition = repetitionScore(cleaned);
+    const contamination = metaContaminationScore(cleaned);
+    return clamp(uniqueRatio * 0.25 + lengthScore * 0.22 + punctuationScore * 0.12 + natural * 0.31 + textEntropy(cleaned) * 0.1 - repetition * 0.42 - contamination * 0.5, 0, 1);
+  }
+
   function isUsefulTrainingText(text, options = {}) {
     if (/u000[123]|\\u000[123]/i.test(String(text || ""))) return false;
     const cleaned = cleanGeneratedText(text, options.maxLength ?? 2400);
@@ -656,6 +672,14 @@
       this.repetitionScore = options.repetitionScore || 0;
       this.trainingValueScore = options.trainingValueScore || 0;
       this.humanFeedbackScore = options.humanFeedbackScore || options.metadata?.humanFeedbackScore || 0;
+      this.sensoryGateEfficiency = options.sensoryGateEfficiency || options.metadata?.sensoryGateEfficiency || 0;
+      this.sensoryGateBonus = options.sensoryGateBonus || 0;
+      this.linguisticScore = options.linguisticScore || options.metadata?.linguisticScore || 0;
+      this.userProfileStrength = options.userProfileStrength || options.metadata?.userProfileStrength || 0;
+      this.toolConfidence = clamp(Number(options.toolConfidence ?? options.metadata?.toolConfidence ?? 0.08), 0, 1);
+      this.profileAttentionMultiplier = clamp(Number(options.profileAttentionMultiplier ?? options.metadata?.profileAttentionMultiplier ?? 1.85), 1, 3.2);
+      this.wakeCycles = Math.max(0, Math.floor(Number(options.wakeCycles ?? options.metadata?.wakeCycles ?? 0)));
+      this.toolUseCount = Math.max(0, Math.floor(Number(options.toolUseCount ?? options.metadata?.toolUseCount ?? 0)));
       this.growthGain = options.growthGain || 0;
       this.toolUseScore = options.toolUseScore || options.metadata?.toolUseScore || 0;
       this.embeddingMutationGain = options.embeddingMutationGain || 0;
@@ -702,6 +726,10 @@
       this.visualDecoder = options.visualDecoder ? decodeTypedOption(options.visualDecoder, Float32Array) : new Float32Array(IMAGE_LATENT_SIZE * 6);
       this.visualBias = options.visualBias ? decodeTypedOption(options.visualBias, Float32Array) : new Float32Array(IMAGE_LATENT_SIZE);
       this.visualMemory = options.visualMemory ? decodeTypedOption(options.visualMemory, Float32Array) : new Float32Array(IMAGE_LATENT_SIZE);
+      this.sensoryGateWeights = options.sensoryGateWeights ? decodeTypedOption(options.sensoryGateWeights, Float32Array) : new Float32Array(this.vocab.length);
+      this.profileKeywordSet = null;
+      this.profileAttentionSeen = 0;
+      this.profileAttentionHits = 0;
 
       if (!options.from) this.randomizeTopology();
       if (!options.tokenEmbedding) this.randomizeEmbeddings();
@@ -715,10 +743,44 @@
       if (!options.innovations) {
         for (let i = 0; i < this.synapses; i++) this.innovations[i] = makeInnovation(this.from[i], this.to[i], i);
       }
+      this.ensureGen7076Compatibility();
     }
 
     static fromJSON(data) {
       return new NeuralGenome(data);
+    }
+
+    ensureGen7076Compatibility() {
+      if (!(this.sensoryGateWeights instanceof Float32Array) || this.sensoryGateWeights.length !== this.vocab.length) {
+        const previous = this.sensoryGateWeights instanceof Float32Array ? this.sensoryGateWeights : new Float32Array();
+        const next = new Float32Array(this.vocab.length);
+        next.fill(1);
+        next.set(previous.slice(0, Math.min(previous.length, next.length)));
+        this.sensoryGateWeights = next;
+      }
+      for (let i = 0; i < this.sensoryGateWeights.length; i++) {
+        if (!Number.isFinite(this.sensoryGateWeights[i]) || this.sensoryGateWeights[i] === 0) this.sensoryGateWeights[i] = 1;
+        else this.sensoryGateWeights[i] = clamp(this.sensoryGateWeights[i], 0.05, 1.6);
+      }
+      this.toolConfidence = clamp(Number(this.toolConfidence ?? this.metadata?.toolConfidence ?? 0.08), 0, 1);
+      this.profileAttentionMultiplier = clamp(Number(this.profileAttentionMultiplier ?? this.metadata?.profileAttentionMultiplier ?? 1.85), 1, 3.2);
+      this.sensoryGateEfficiency = clamp(Number(this.sensoryGateEfficiency || this.metadata?.sensoryGateEfficiency || 0), 0, 1);
+      this.sensoryGateBonus = clamp(Number(this.sensoryGateBonus || 0), 0, 0.08);
+      this.linguisticScore = clamp(Number(this.linguisticScore || this.metadata?.linguisticScore || 0), 0, 1);
+      this.userProfileStrength = clamp(Number(this.userProfileStrength || this.metadata?.userProfileStrength || 0), 0, 1);
+      this.wakeCycles = Math.max(0, Math.floor(Number(this.wakeCycles || this.metadata?.wakeCycles || 0)));
+      this.toolUseCount = Math.max(0, Math.floor(Number(this.toolUseCount || this.metadata?.toolUseCount || 0)));
+      this.metadata = {
+        ...(this.metadata || {}),
+        toolConfidence: this.toolConfidence,
+        profileAttentionMultiplier: this.profileAttentionMultiplier,
+        sensoryGateEfficiency: this.sensoryGateEfficiency,
+        linguisticScore: this.linguisticScore,
+        userProfileStrength: this.userProfileStrength,
+        wakeCycles: this.wakeCycles,
+        toolUseCount: this.toolUseCount
+      };
+      return this;
     }
 
     clone() {
@@ -748,11 +810,19 @@
         repetitionScore: this.repetitionScore,
         trainingValueScore: this.trainingValueScore,
         humanFeedbackScore: this.humanFeedbackScore,
+        sensoryGateEfficiency: this.sensoryGateEfficiency,
+        sensoryGateBonus: this.sensoryGateBonus,
+        linguisticScore: this.linguisticScore,
+        userProfileStrength: this.userProfileStrength,
+        toolConfidence: this.toolConfidence,
+        profileAttentionMultiplier: this.profileAttentionMultiplier,
+        wakeCycles: this.wakeCycles,
+        toolUseCount: this.toolUseCount,
         growthGain: this.growthGain,
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
         stableFitness: this.stableFitness || 0,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0, toolConfidence: this.toolConfidence || 0, wakeCycles: this.wakeCycles || 0, toolUseCount: this.toolUseCount || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -786,7 +856,8 @@
         visualEncoder: Array.from(this.visualEncoder),
         visualDecoder: Array.from(this.visualDecoder),
         visualBias: Array.from(this.visualBias),
-        visualMemory: Array.from(this.visualMemory)
+        visualMemory: Array.from(this.visualMemory),
+        sensoryGateWeights: Array.from(this.sensoryGateWeights)
       };
     }
 
@@ -813,11 +884,19 @@
         repetitionScore: this.repetitionScore,
         trainingValueScore: this.trainingValueScore,
         humanFeedbackScore: this.humanFeedbackScore,
+        sensoryGateEfficiency: this.sensoryGateEfficiency,
+        sensoryGateBonus: this.sensoryGateBonus,
+        linguisticScore: this.linguisticScore,
+        userProfileStrength: this.userProfileStrength,
+        toolConfidence: this.toolConfidence,
+        profileAttentionMultiplier: this.profileAttentionMultiplier,
+        wakeCycles: this.wakeCycles,
+        toolUseCount: this.toolUseCount,
         growthGain: this.growthGain,
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
         stableFitness: this.stableFitness || 0,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0, toolConfidence: this.toolConfidence || 0, wakeCycles: this.wakeCycles || 0, toolUseCount: this.toolUseCount || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -851,7 +930,8 @@
         visualEncoder: { encoding: "base64", type: "Float32Array", data: typedArrayToBase64(this.visualEncoder) },
         visualDecoder: { encoding: "base64", type: "Float32Array", data: typedArrayToBase64(this.visualDecoder) },
         visualBias: { encoding: "base64", type: "Float32Array", data: typedArrayToBase64(this.visualBias) },
-        visualMemory: { encoding: "base64", type: "Float32Array", data: typedArrayToBase64(this.visualMemory) }
+        visualMemory: { encoding: "base64", type: "Float32Array", data: typedArrayToBase64(this.visualMemory) },
+        sensoryGateWeights: { encoding: "base64", type: "Float32Array", data: typedArrayToBase64(this.sensoryGateWeights) }
       };
     }
 
@@ -1236,6 +1316,11 @@
       if (Math.random() < scalarMutation) this.plasticityRate = clamp(this.plasticityRate + randomWeight(0.0018), 0, 0.04);
       if (Math.random() < scalarMutation) this.recurrentBridgeRate = clamp(this.recurrentBridgeRate + randomWeight(0.006), 0, 0.22);
       if (Math.random() < scalarMutation) this.memorySensitivity = clamp(this.memorySensitivity + randomWeight(0.05), 0.35, 2.5);
+      if (Math.random() < scalarMutation) this.toolConfidence = clamp(this.toolConfidence + randomWeight(0.035), 0, 1);
+      if (Math.random() < scalarMutation) this.profileAttentionMultiplier = clamp(this.profileAttentionMultiplier + randomWeight(0.08), 1, 3.2);
+      for (let i = 0; i < this.sensoryGateWeights.length; i++) {
+        if (Math.random() < mutation * 0.08) this.sensoryGateWeights[i] = clamp(this.sensoryGateWeights[i] + randomWeight(0.08), 0.05, 1.6);
+      }
       for (let i = 0; i < this.neuronTypes.length; i++) {
         if (Math.random() < mutation * 0.045) this.neuronTypes[i] = Math.floor(Math.random() * NEURON_TYPES.length);
       }
@@ -1270,6 +1355,7 @@
       const oldWeights = this.outputWeights;
       const oldBias = this.outputBias;
       const oldMemoryOut = this.memoryOut;
+      const oldSensoryGate = this.sensoryGateWeights || new Float32Array();
       this.vocab = [...next];
       this.tokenToIndex = new Map(this.vocab.map((token, index) => [token, index]));
       this.charToIndex = this.tokenToIndex;
@@ -1278,6 +1364,7 @@
       this.outputWeights = new Float32Array(this.vocab.length * 8);
       this.outputBias = new Float32Array(this.vocab.length);
       this.memoryOut = new Float32Array(this.vocab.length * 4);
+      this.sensoryGateWeights = new Float32Array(this.vocab.length);
       for (let i = 0; i < this.vocab.length; i++) {
         const oldIndex = oldVocab.indexOf(this.vocab[i]);
         if (oldIndex >= 0) {
@@ -1285,21 +1372,25 @@
           for (let j = 0; j < 8; j++) this.outputWeights[i * 8 + j] = oldWeights[oldIndex * 8 + j] || randomWeight(0.2);
           for (let j = 0; j < 4; j++) this.memoryOut[i * 4 + j] = oldMemoryOut[oldIndex * 4 + j] || randomWeight(0.08);
           this.outputBias[i] = oldBias[oldIndex] || 0;
+          this.sensoryGateWeights[i] = oldSensoryGate[oldIndex] || 1;
         } else {
           const hash = hashString(this.vocab[i]);
           for (let j = 0; j < TOKEN_EMBEDDING_SIZE; j++) this.tokenEmbedding[i * TOKEN_EMBEDDING_SIZE + j] = ((((hash >>> (j % 16)) & 255) / 127.5 - 1) * 0.16) + randomWeight(0.06);
           for (let j = 0; j < 8; j++) this.outputWeights[i * 8 + j] = randomWeight(0.25);
           for (let j = 0; j < 4; j++) this.memoryOut[i * 4 + j] = randomWeight(0.08);
           this.outputBias[i] = randomWeight(0.05);
+          this.sensoryGateWeights[i] = 1;
         }
       }
+      this.ensureGen7076Compatibility();
     }
 
     inputToken(state, token) {
       const tokenIndex = typeof token === "number" ? token : (this.tokenToIndex.get(token) ?? this.tokenToIndex.get(" ") ?? 0);
       const tokenText = this.vocab[tokenIndex] || " ";
       const code = hashString(tokenText) || tokenText.charCodeAt(0) || 0;
-      const lengthBoost = Math.min(1.35, 1 + Math.max(0, tokenText.length - 1) * 0.025);
+      const profileBoost = this.profileTokenBoost(tokenText);
+      const lengthBoost = Math.min(1.35, 1 + Math.max(0, tokenText.length - 1) * 0.025) * profileBoost;
       for (let i = 0; i < 10; i++) {
         const index = (Math.imul(code + i * 131, 2654435761) >>> 0) % this.neurons;
         const sensoryBoost = this.neuronTypes[index] === 3 ? 1.28 : 1;
@@ -1310,6 +1401,34 @@
 
     inputChar(state, char) {
       this.inputToken(state, this.tokenToIndex.get(char) ?? this.tokenToIndex.get(" ") ?? 0);
+    }
+
+    setUserProfileAttention(profileText = "") {
+      const keys = keywordSet(profileText, 48);
+      this.profileKeywordSet = keys.size ? keys : null;
+      this.profileAttentionSeen = 0;
+      this.profileAttentionHits = 0;
+      this.userProfileStrength = 0;
+      return this;
+    }
+
+    profileTokenBoost(tokenText = "") {
+      if (!this.profileKeywordSet || !this.profileKeywordSet.size) return 1;
+      const normalized = String(tokenText || "").toLowerCase().replace(/[^a-z0-9'-]/g, "");
+      if (normalized.length < 3) return 1;
+      this.profileAttentionSeen += 1;
+      let hit = this.profileKeywordSet.has(normalized);
+      if (!hit && normalized.length >= 4) {
+        for (const key of this.profileKeywordSet) {
+          if (key.length >= 4 && (normalized.includes(key) || key.includes(normalized))) {
+            hit = true;
+            break;
+          }
+        }
+      }
+      if (hit) this.profileAttentionHits += 1;
+      this.userProfileStrength = clamp(this.profileAttentionHits / Math.max(1, this.profileAttentionSeen), 0, 1);
+      return hit ? this.profileAttentionMultiplier : 1;
     }
 
     step(state, memory) {
@@ -1683,12 +1802,14 @@
       const contamination = metaContaminationScore(generated);
       const repetition = repetitionScore(generated);
       const value = trainingValueScore(generated);
+      const linguistic = calculateLinguisticFitness(generated);
       this.coherenceScore = clamp((this.coherenceScore || 0) * 0.65 + score * 0.35, 0, 1);
       this.dialogueScore = clamp((this.dialogueScore || 0) * 0.6 + dialogue * 0.4, 0, 1);
       this.contaminationScore = clamp((this.contaminationScore || 0) * 0.6 + contamination * 0.4, 0, 1);
       this.repetitionScore = clamp((this.repetitionScore || 0) * 0.6 + repetition * 0.4, 0, 1);
       this.trainingValueScore = clamp((this.trainingValueScore || 0) * 0.6 + value * 0.4, 0, 1);
-      return { score: this.coherenceScore, dialogue: this.dialogueScore, contamination: this.contaminationScore, repetition: this.repetitionScore, value: this.trainingValueScore, generated };
+      this.linguisticScore = clamp((this.linguisticScore || 0) * 0.62 + linguistic * 0.38, 0, 1);
+      return { score: this.coherenceScore, dialogue: this.dialogueScore, contamination: this.contaminationScore, repetition: this.repetitionScore, value: this.trainingValueScore, linguistic: this.linguisticScore, generated };
     }
 
     generate(prompt, length = 420, temperature = 0.9, options = {}) {
@@ -1708,7 +1829,8 @@
         this.inputToken(state, current);
         if (options.plastic === false) this.step(state, memory);
         else this.plasticStep(state, memory, this.plasticityRate * 0.55);
-        const token = weightedSample(this.logits(state, memory), temperature);
+        const logits = this.logits(state, memory);
+        const token = this.softToolReflex(logits, weightedSample(logits, temperature), options);
         const piece = tokenIsSafe(this.vocab[token]) ? this.vocab[token] : " ";
         current = token;
         if (piece === CONTROL_TURN_END) break;
@@ -1717,6 +1839,55 @@
         if (output.length >= length) break;
       }
       return cleanGeneratedText(output, length);
+    }
+
+    softToolReflex(logits, sampledToken, options = {}) {
+      if (options.allowToolReflex === false || !this.toolConfidence || Math.random() > this.toolConfidence * 0.1) return sampledToken;
+      const toolPattern = /\[|SEARCH|WIKI|FETCH|YOUTUBE|SELF_TUNE/i;
+      let best = sampledToken;
+      let bestValue = -Infinity;
+      const stride = Math.max(1, Math.floor(this.vocab.length / 160));
+      for (let i = 0; i < this.vocab.length; i += stride) {
+        const token = this.vocab[i] || "";
+        if (!toolPattern.test(token)) continue;
+        const value = logits[i] || 0;
+        if (value > bestValue) {
+          bestValue = value;
+          best = i;
+        }
+      }
+      if (best !== sampledToken) this.toolConfidence = clamp(this.toolConfidence * 0.996 + 0.002, 0, 1);
+      return best;
+    }
+
+    evolveSensoryGate(rawTokens = "") {
+      const text = Array.isArray(rawTokens) ? rawTokens.join("") : String(rawTokens || "");
+      const cleaned = cleanTrainingText(text, 12000);
+      if (!cleaned || !this.sensoryGateWeights?.length) return { filteredText: "", efficiency: this.sensoryGateEfficiency || 0, bonus: this.sensoryGateBonus || 0, tokens: 0 };
+      const tokens = encodeTokens(cleaned, this.vocab, 1800, this.tokenMatcher, this.tokenToIndex);
+      let useful = 0;
+      let total = 0;
+      for (const token of tokens) {
+        const tokenText = this.vocab[token] || "";
+        const noisy = metaContaminationScore(tokenText) > 0.28 || repetitionScore(tokenText) > 0.6 || textNoiseRatio(tokenText) > 0.08;
+        const natural = /[a-z0-9]{3,}/i.test(tokenText) || /[.!?]/.test(tokenText);
+        const delta = noisy ? -0.055 : natural ? 0.025 : 0.004;
+        this.sensoryGateWeights[token] = clamp((this.sensoryGateWeights[token] || 1) * 0.992 + delta, 0.05, 1.6);
+        useful += this.sensoryGateWeights[token] >= 0.32 ? 1 : 0;
+        total += 1;
+      }
+      const lines = cleaned.split(/\n+/).map(line => cleanTrainingText(line, 900)).filter(Boolean);
+      const kept = [];
+      for (const line of lines) {
+        const lineTokens = encodeTokens(line, this.vocab, 260, this.tokenMatcher, this.tokenToIndex);
+        const avgGate = lineTokens.reduce((sum, token) => sum + (this.sensoryGateWeights[token] || 1), 0) / Math.max(1, lineTokens.length);
+        if (avgGate >= 0.28 && metaContaminationScore(line) < 0.55) kept.push(line);
+      }
+      const filteredText = cleanTrainingText((kept.length ? kept : lines.slice(0, 8)).join("\n"), 6000);
+      const efficiency = total ? useful / total : 0;
+      this.sensoryGateEfficiency = clamp((this.sensoryGateEfficiency || 0) * 0.72 + efficiency * 0.28, 0, 1);
+      this.sensoryGateBonus = Math.min(0.08, this.sensoryGateEfficiency * 0.08);
+      return { filteredText, efficiency: this.sensoryGateEfficiency, bonus: this.sensoryGateBonus, tokens: total };
     }
 
     seeImage(target, learningRate = 0.08) {
@@ -2043,10 +2214,15 @@
       blend(fitter.visualEncoder, other.visualEncoder, child.visualEncoder);
       blend(fitter.visualDecoder, other.visualDecoder, child.visualDecoder);
       blend(fitter.visualMemory, other.visualMemory, child.visualMemory);
+      blend(fitter.sensoryGateWeights || new Float32Array(child.vocab.length), other.sensoryGateWeights || new Float32Array(child.vocab.length), child.sensoryGateWeights);
       child.plasticityRate = Math.random() < 0.5 ? fitter.plasticityRate : (fitter.plasticityRate + other.plasticityRate) * 0.5;
       child.recurrentBridgeRate = Math.random() < 0.5 ? fitter.recurrentBridgeRate : (fitter.recurrentBridgeRate + other.recurrentBridgeRate) * 0.5;
       child.memorySensitivity = Math.random() < 0.5 ? fitter.memorySensitivity : (fitter.memorySensitivity + other.memorySensitivity) * 0.5;
+      child.toolConfidence = clamp(Math.random() < 0.5 ? fitter.toolConfidence : (fitter.toolConfidence + other.toolConfidence) * 0.5, 0, 1);
+      child.profileAttentionMultiplier = clamp(Math.random() < 0.5 ? fitter.profileAttentionMultiplier : (fitter.profileAttentionMultiplier + other.profileAttentionMultiplier) * 0.5, 1, 3.2);
       child.toolUseScore = clamp(((fitter.toolUseScore || 0) * 0.7) + ((other.toolUseScore || 0) * 0.3), 0, 1);
+      child.sensoryGateEfficiency = clamp(((fitter.sensoryGateEfficiency || 0) * 0.7) + ((other.sensoryGateEfficiency || 0) * 0.3), 0, 1);
+      child.linguisticScore = clamp(((fitter.linguisticScore || 0) * 0.7) + ((other.linguisticScore || 0) * 0.3), 0, 1);
       child.stableFitness = Math.max(fitter.stableFitness || 0, other.stableFitness || 0) * 0.985;
       child.metadata = { ...(child.metadata || {}), toolUseScore: child.toolUseScore, stableFitness: child.stableFitness, bestFitness: Math.max(fitter.metadata?.bestFitness || 0, other.metadata?.bestFitness || 0) * 0.985 };
       for (let i = 0; i < child.neuronTypes.length; i++) {
@@ -2323,6 +2499,12 @@
       return species;
     }
 
+    prepareGenomeContext(genome) {
+      if (genome?.ensureGen7076Compatibility) genome.ensureGen7076Compatibility();
+      if (genome?.setUserProfileAttention) genome.setUserProfileAttention(this.userProfile || "");
+      return genome;
+    }
+
     shapeFitness(genome, options = {}) {
       const targetNeurons = Math.max(64, options.targetNeurons || this.config.neurons || genome.neurons);
       const targetSynapses = Math.max(128, options.targetSynapses || this.config.synapses || genome.synapses);
@@ -2389,6 +2571,9 @@
       const naturalnessBonus = Math.min(0.18, Math.max(0, genome.trainingValueScore || 0) * 0.18);
       const userProfileBonus = this.userProfile ? Math.min(0.14, Math.max(0, genome.coherenceScore || 0) * 0.07 + Math.max(0, genome.humanFeedbackScore || 0) * 0.09) : 0;
       const humanFeedbackBonus = Math.min(0.32, Math.max(0, genome.humanFeedbackScore || 0) * 0.32);
+      const sensoryGateBonus = Math.min(0.08, Math.max(0, genome.sensoryGateBonus || genome.sensoryGateEfficiency * 0.08 || 0));
+      const linguisticBonus = Math.min(0.18, Math.max(0, genome.linguisticScore || 0) * 0.18);
+      const profileStrengthBonus = Math.min(0.12, Math.max(0, genome.userProfileStrength || 0) * 0.12);
       const contaminationPenalty = Math.min(0.26, Math.max(0, genome.contaminationScore || 0) * 0.26);
       const repetitionPenalty = Math.min(0.22, Math.max(0, genome.repetitionScore || 0) * 0.22);
       genome.growthBonus = growthBonus;
@@ -2398,6 +2583,9 @@
       genome.naturalnessBonus = naturalnessBonus;
       genome.humanFeedbackBonus = humanFeedbackBonus;
       genome.userProfileBonus = userProfileBonus;
+      genome.sensoryGateBonus = sensoryGateBonus;
+      genome.linguisticBonus = linguisticBonus;
+      genome.profileStrengthBonus = profileStrengthBonus;
       genome.contaminationPenalty = contaminationPenalty;
       genome.repetitionPenalty = repetitionPenalty;
       genome.memoryBalancePenalty = memoryBalancePenalty;
@@ -2415,7 +2603,7 @@
 
       const scaleFloor = options.protectScale === false ? 0.18 : 0.72;
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
-      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + naturalnessBonus + humanFeedbackBonus + userProfileBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty) * (1 - contaminationPenalty) * (1 - repetitionPenalty);
+      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + naturalnessBonus + humanFeedbackBonus + userProfileBonus + sensoryGateBonus + linguisticBonus + profileStrengthBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty) * (1 - contaminationPenalty) * (1 - repetitionPenalty);
       const immigrantProtected = genome.origin === "immigrant" && Number(genome.metadata?.protectedUntil || 0) > this.generation;
       if (genome.origin === "immigrant" && neuronRatio < 0.55 && !immigrantProtected) genome.fitness *= 0.62;
       genome.stableFitness = clamp(Math.max(genome.fitness, (genome.stableFitness || 0) * 0.992), 0, Math.max(1, genome.fitness * 1.35 + 0.1));
@@ -2585,6 +2773,7 @@
       const dialogueMode = options.dialogueMode || /[\u0001\u0002\u0003]|\b(User|Human|NeuroGenesis|Assistant):/i.test(trainingText);
       if (imageTargets.length) this.imageTrainingCursor = (this.imageTrainingCursor + 1) % imageTargets.length;
       for (const genome of this.population) {
+        this.prepareGenomeContext(genome);
         if (dialogueMode) genome.evaluateDialogue(trainingText, options.dialogueMaxChars || options.maxChars || 1200);
         else genome.evaluateText(trainingText, options.maxChars || 760);
         if (imageTarget) {
@@ -2619,6 +2808,7 @@
       }
       const species = this.speciate();
       const champion = this.population[0].clone();
+      this.prepareGenomeContext(champion);
       const spiralMutationBoost = spiral.active ? 2.35 : 1;
       const mutationRate = clamp(this.config.mutation * (options.mutationMultiplier || 1) * spiralMutationBoost, 0.001, 0.25);
       if (dialogueMode) {
@@ -2740,6 +2930,7 @@
       this.population = next;
       this.generation += 1;
       this.population[0].generation = this.generation;
+      this.population[0].wakeCycles = Math.max(0, Math.floor(Number(this.population[0].wakeCycles || 0))) + 1;
       let spiralConsolidation = null;
       const activeAfterGeneration = this.spiralStatus();
       if (spiral.active && activeAfterGeneration.active && spiral.startFitness > 0 && this.population[0].fitness >= spiral.startFitness * 1.08) {
@@ -3050,8 +3241,39 @@
       return { accepted: true, rating: -1, value, fitness: best.fitness };
     }
 
+    evolveSensoryGate(genome = this.best(), rawTokens = "") {
+      if (!genome?.evolveSensoryGate) return { filteredText: cleanTrainingText(rawTokens, 6000), efficiency: 0, bonus: 0, tokens: 0 };
+      const result = genome.evolveSensoryGate(rawTokens);
+      genome.toolUseCount = Math.max(0, Math.floor(Number(genome.toolUseCount || 0))) + 1;
+      this.shapeFitness(genome, { protectScale: true, trainingText: result.filteredText || String(rawTokens || "") });
+      return result;
+    }
+
+    maybeCircadianDream(options = {}) {
+      const champion = this.best();
+      if (!champion) return null;
+      const wakeReady = (champion.wakeCycles || 0) >= (options.wakeThreshold || 200);
+      const toolReady = (champion.toolUseCount || 0) >= (options.toolThreshold || 10);
+      if (!wakeReady && !toolReady && !options.force) return null;
+      const result = this.dreamReplay({
+        count: options.count || 8,
+        maxChars: options.maxChars || 1200,
+        maxTokens: options.maxTokens || 360,
+        gradientSteps: options.gradientSteps ?? 1,
+        plasticityBoost: options.plasticityBoost || 2.15,
+        memoryCalm: options.memoryCalm ?? 0.06,
+        memoryCalmAfter: options.memoryCalmAfter ?? 0.045,
+        protectScale: true
+      });
+      champion.wakeCycles = 0;
+      champion.toolUseCount = 0;
+      champion.metadata = { ...(champion.metadata || {}), wakeCycles: 0, toolUseCount: 0, lastCircadianDreamAt: Date.now() };
+      return result;
+    }
+
     dreamReplay(options = {}) {
       const champion = this.best();
+      this.prepareGenomeContext(champion);
       this.consolidateConversationMemory();
       const sourceText = cleanTrainingText(`${this.userProfile}\n${this.memorySummary}\n${this.persistentContext}\n${this.mirrorCorpus.slice(-24).join("\n")}\n${this.corpus}`, options.sourceChars ?? 9000);
       if (!this.memoryBank.length && !sourceText) return { dreamed: 0, loss: champion.loss, coherence: champion.coherenceScore || 0, tuned: null, lossDelta: 0 };
@@ -3118,6 +3340,9 @@
         champion.dreamCount = Math.max(0, Math.floor(Number(champion.dreamCount || champion.metadata.dreamCount || 0))) + 1;
         champion.metadata.dreamCount = champion.dreamCount;
       }
+      champion.wakeCycles = options.resetWakeCycles === false ? champion.wakeCycles : 0;
+      if (options.resetToolUse !== false) champion.toolUseCount = 0;
+      champion.metadata = { ...(champion.metadata || {}), wakeCycles: champion.wakeCycles || 0, toolUseCount: champion.toolUseCount || 0 };
       return {
         dreamed: memories.length + (corpusReplay ? 1 : 0) + weakTurns.length,
         loss: champion.loss,
@@ -3164,6 +3389,7 @@
     metaContaminationScore,
     humanSignalScore,
     trainingValueScore,
+    calculateLinguisticFitness,
     coherenceScore,
     ngramOverlapScore,
     naturalDialogueScore,

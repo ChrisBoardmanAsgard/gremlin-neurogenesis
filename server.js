@@ -581,16 +581,24 @@ function selfTuneFromInspiration(topic) {
 function rewardEffectiveToolUse(result, commandKind = "TOOL") {
   const best = serverLab.best();
   if (!best || result?.error) return 0;
+  const sensory = serverLab.evolveSensoryGate ? serverLab.evolveSensoryGate(best, result.text || "") : null;
+  if (sensory?.filteredText) {
+    result.rawText = result.text;
+    result.text = sensory.filteredText;
+    result.sensoryGate = sensory;
+  }
   const usefulChars = Math.max(0, String(result?.text || "").length);
   if (usefulChars < 120 && commandKind !== "SELF_TUNE") return 0;
   const usefulSignal = Math.min(1, usefulChars / 6000);
   const kindBoost = commandKind === "SELF_TUNE" ? 0.7 : commandKind === "YOUTUBE" || commandKind === "TRANSCRIPT" ? 1.08 : 1;
   const reward = Math.min(0.04, usefulSignal * kindBoost * 0.024);
   best.toolUseScore = Math.min(1, (best.toolUseScore || best.metadata?.toolUseScore || 0) * 0.965 + usefulSignal * kindBoost * 0.055);
-  best.metadata = { ...(best.metadata || {}), toolUseScore: best.toolUseScore };
+  best.metadata = { ...(best.metadata || {}), toolUseScore: best.toolUseScore, sensoryGateEfficiency: best.sensoryGateEfficiency || 0, toolUseCount: best.toolUseCount || 0 };
   best.selfTuningGain = Math.min(0.5, (best.selfTuningGain || 0) + reward * 0.42);
   best.memorySensitivity = Math.min(2.5, (best.memorySensitivity || 1) + reward * 0.3);
   best.fitness = Math.max(best.fitness || 0, (best.fitness || 0) + reward);
+  const dream = serverLab.maybeCircadianDream ? serverLab.maybeCircadianDream({ toolThreshold: 10, wakeThreshold: 200, maxChars: serverLab.config.neurons > 1800 ? 900 : 1200 }) : null;
+  if (dream?.dreamed) serverEvolution.lastDream = { at: new Date().toISOString(), circadian: true, memories: dream.dreamed, loss: dream.loss, coherence: dream.coherence };
   return reward;
 }
 
@@ -758,6 +766,7 @@ async function rewardToolUseProbe() {
     rewardEffectiveToolUse({ text: results.map(result => result.text || "").join("\n") }, "SEARCH");
     serverLab.remember(toolContext(results), { source: "tool", strength: 1.1 });
   }
+  if (serverLab.maybeCircadianDream) serverLab.maybeCircadianDream({ wakeThreshold: 200, toolThreshold: 10, maxChars: serverLab.config.neurons > 1800 ? 900 : 1200 });
 }
 
 function recentFitnessDips(history = [], limit = 5) {
@@ -1073,6 +1082,14 @@ function serverSnapshot() {
     repetition: best.repetitionScore || 0,
     humanFeedback: best.humanFeedbackScore || 0,
     toolUseScore: best.toolUseScore || best.metadata?.toolUseScore || 0,
+    toolConfidence: best.toolConfidence || best.metadata?.toolConfidence || 0,
+    sensoryGateEfficiency: best.sensoryGateEfficiency || best.metadata?.sensoryGateEfficiency || 0,
+    sensoryGateBonus: best.sensoryGateBonus || 0,
+    linguisticScore: best.linguisticScore || best.metadata?.linguisticScore || 0,
+    userProfileStrength: best.userProfileStrength || best.metadata?.userProfileStrength || 0,
+    profileAttentionMultiplier: best.profileAttentionMultiplier || best.metadata?.profileAttentionMultiplier || 1.85,
+    wakeCycles: best.wakeCycles || best.metadata?.wakeCycles || 0,
+    toolUseCount: best.toolUseCount || best.metadata?.toolUseCount || 0,
     growthBonus: best.growthBonus || 0,
     healthyScaleBonus: best.healthyScaleBonus || 0,
     spiral: serverLab.spiralStatus ? serverLab.spiralStatus() : null,
@@ -1164,6 +1181,11 @@ async function serverEvolutionTick() {
     }
     runSelfGeneratedDataLoop();
     runDreamPhase();
+    const circadianDream = serverLab.maybeCircadianDream ? serverLab.maybeCircadianDream({ wakeThreshold: 200, toolThreshold: 10, maxChars: serverLab.config.neurons > 1800 ? 900 : 1200 }) : null;
+    if (circadianDream?.dreamed) {
+      serverEvolution.dreams += 1;
+      serverEvolution.lastDream = { at: new Date().toISOString(), circadian: true, memories: circadianDream.dreamed, loss: circadianDream.loss, coherence: circadianDream.coherence };
+    }
     await rewardToolUseProbe();
     serverEvolution.cycles += 1;
     broadcastEvent("evolution", {
@@ -1172,6 +1194,11 @@ async function serverEvolutionTick() {
       loss: serverLab.best().loss,
       coherence: serverLab.best().coherenceScore || 0,
       dialogue: serverLab.best().dialogueScore || 0,
+      linguisticScore: serverLab.best().linguisticScore || 0,
+      sensoryGateEfficiency: serverLab.best().sensoryGateEfficiency || 0,
+      userProfileStrength: serverLab.best().userProfileStrength || 0,
+      wakeCycles: serverLab.best().wakeCycles || 0,
+      toolUseCount: serverLab.best().toolUseCount || 0,
       neurons: serverLab.best().neurons,
       synapses: serverLab.best().synapses,
       topologyMode: evolutionResult.topologyMode,
@@ -1337,6 +1364,15 @@ const server = http.createServer(async (req, res) => {
         queuedJobs: jobQueue.length,
         hasJob: Boolean(currentJob),
         serverEvolution: serverSnapshot(),
+        metrics: {
+          sensoryGateEfficiency: serverLab.best().sensoryGateEfficiency || 0,
+          sensoryGateBonus: serverLab.best().sensoryGateBonus || 0,
+          linguisticScore: serverLab.best().linguisticScore || 0,
+          userProfileStrength: serverLab.best().userProfileStrength || 0,
+          toolConfidence: serverLab.best().toolConfidence || 0,
+          wakeCycles: serverLab.best().wakeCycles || 0,
+          toolUseCount: serverLab.best().toolUseCount || 0
+        },
         addresses: localAddresses()
       });
       return;
