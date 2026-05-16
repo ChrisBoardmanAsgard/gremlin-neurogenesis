@@ -38,6 +38,8 @@
   const NEURON_TYPES = ["excitatory", "inhibitory", "modulatory", "sensory", "memory", "visual"];
   const TYPE_COLORS = ["#b9f26d", "#ff6f61", "#54d2c4", "#f4d35e", "#b7a8ff", "#ff9bd2"];
   const COMMON_CHAT_WORDS = new Set("hello hey here awake learning local training data from scratch evolving neural organism memory tool search wiki when facts needed use can emit still stabilizing vocabulary try more text ask again what are you i am is the and to my it this come comes reply replies".split(" "));
+  const META_SPAM_WORDS = new Set("plasticity sparse topology synapse synapses neuron neurons genome genomes mutation mutations fitness loss corpus reconstruction autoencoder latent decoder encoder duckduckgo wikipedia server gradient hebbian recurrent logits entropy speciation species distill distillation self-tune self-generated neuroevolution generation curriculum".split(" "));
+  const LAB_LOG_PATTERN = /\b(?:fitness|loss|plasticity|synapse|neuron|generation|curriculum|duckduckgo|reconstruction|autoencoder|self-generated|self-tune|mirror corpus|dream consolidation)\b/gi;
   let globalInnovation = 1;
 
   function clamp(value, min, max) {
@@ -153,6 +155,58 @@
     return noisy / Math.max(1, raw.length);
   }
 
+  function repetitionScore(text) {
+    const words = cleanGeneratedText(text, 3000).toLowerCase().match(/[a-z0-9']+/g) || [];
+    if (words.length < 5) return 0;
+    let repeats = 0;
+    for (let i = 1; i < words.length; i++) {
+      if (words[i] === words[i - 1]) repeats += 1;
+    }
+    const uniqueRatio = new Set(words).size / Math.max(1, words.length);
+    const bigrams = new Map();
+    for (let i = 0; i < words.length - 1; i++) {
+      const key = `${words[i]} ${words[i + 1]}`;
+      bigrams.set(key, (bigrams.get(key) || 0) + 1);
+    }
+    const bigramRepeat = [...bigrams.values()].filter(count => count > 2).reduce((sum, count) => sum + count - 2, 0);
+    return clamp(repeats / words.length * 2.5 + Math.max(0, 0.42 - uniqueRatio) * 1.7 + bigramRepeat / Math.max(1, words.length) * 2.2, 0, 1);
+  }
+
+  function metaContaminationScore(text) {
+    const cleaned = cleanGeneratedText(text, 5000).toLowerCase();
+    if (!cleaned) return 0;
+    const words = cleaned.match(/[a-z0-9'-]+/g) || [];
+    if (!words.length) return 0;
+    const metaHits = words.filter(word => META_SPAM_WORDS.has(word)).length;
+    const bracketTool = (cleaned.match(/\[(?:search|wiki|fetch|youtube|self_tune):/gi) || []).length;
+    const labLogs = (cleaned.match(LAB_LOG_PATTERN) || []).length;
+    const numericNoise = (cleaned.match(/\b\d+(?:\.\d+)?(?:ms|n|s)?\b/g) || []).length / Math.max(1, words.length);
+    return clamp(metaHits / words.length * 4.2 + bracketTool * 0.08 + labLogs / words.length * 2.4 + numericNoise * 0.8, 0, 1);
+  }
+
+  function humanSignalScore(text) {
+    const cleaned = cleanGeneratedText(text, 2400);
+    if (!cleaned) return 0;
+    const lower = cleaned.toLowerCase();
+    const direct = /\b(user|human|chris):/i.test(cleaned) ? 0.28 : 0;
+    const conversational = /\b(i|you|we|my|your|feel|think|want|help|please|thanks|why|how|what|remember)\b/i.test(lower) ? 0.22 : 0;
+    const natural = naturalDialogueScore(cleaned) * 0.34;
+    const clean = (1 - metaContaminationScore(cleaned)) * 0.16;
+    return clamp(direct + conversational + natural + clean, 0, 1);
+  }
+
+  function trainingValueScore(text) {
+    const cleaned = cleanGeneratedText(text, 3000);
+    if (!cleaned) return 0;
+    const quality = chatQualityScore(cleaned);
+    const dialogue = naturalDialogueScore(cleaned);
+    const entropy = textEntropy(cleaned);
+    const human = humanSignalScore(cleaned);
+    const contamination = metaContaminationScore(cleaned);
+    const repetition = repetitionScore(cleaned);
+    return clamp(quality * 0.28 + dialogue * 0.28 + entropy * 0.18 + human * 0.18 + Math.min(1, cleaned.length / 260) * 0.08 - contamination * 0.35 - repetition * 0.28, 0, 1);
+  }
+
   function isUsefulTrainingText(text, options = {}) {
     if (/u000[123]|\\u000[123]/i.test(String(text || ""))) return false;
     const cleaned = cleanGeneratedText(text, options.maxLength ?? 2400);
@@ -161,12 +215,16 @@
     const quality = chatQualityScore(cleaned);
     const entropy = textEntropy(cleaned);
     const dialogue = naturalDialogueScore(cleaned);
+    const contamination = metaContaminationScore(cleaned);
+    const repetition = repetitionScore(cleaned);
     const words = cleaned.match(/[A-Za-z']+/g) || [];
     const oneLetterRatio = words.filter(word => word.length === 1).length / Math.max(1, words.length);
     const longClumps = words.filter(word => /[bcdfghjklmnpqrstvwxyz]{5,}/i.test(word)).length / Math.max(1, words.length);
     return quality >= (options.minQuality ?? 0.42)
       && entropy >= (options.minEntropy ?? 0.42)
       && dialogue >= (options.minDialogue ?? 0.32)
+      && contamination <= (options.maxContamination ?? 0.42)
+      && repetition <= (options.maxRepetition ?? 0.48)
       && oneLetterRatio <= (options.maxOneLetterRatio ?? 0.28)
       && longClumps <= (options.maxClumpRatio ?? 0.16);
   }
@@ -182,7 +240,7 @@
     for (const block of blocks.length ? blocks : cleaned.split(/\n+/)) {
       const safeFallback = /I am still stabilizing my chat vocabulary|Hey\. I am awake|ready to train|Dream phase complete/i.test(block);
       const isUserOnly = /^(User|Human):\s*.{1,120}$/i.test(block) && !/\b(NeuroGenesis|Genesis|Assistant):/i.test(block);
-      if (safeFallback || isUserOnly || isUsefulTrainingText(block, { minQuality: 0.38, minEntropy: 0.36, minDialogue: 0.24, minLength: 12 })) {
+      if (safeFallback || isUserOnly || isUsefulTrainingText(block, { minQuality: 0.38, minEntropy: 0.36, minDialogue: 0.24, minLength: 12, maxContamination: 0.32, maxRepetition: 0.42 })) {
         kept.push(block.slice(0, 1200));
       }
     }
@@ -192,7 +250,21 @@
   function sanitizeMemoryBank(memoryBank, limit = 240) {
     if (!Array.isArray(memoryBank)) return [];
     return memoryBank
-      .filter(item => item && isUsefulTrainingText(item.text || "", { minQuality: 0.36, minEntropy: 0.34, minDialogue: 0.22, minLength: 12 }))
+      .map(item => {
+        if (!item) return null;
+        const text = cleanTrainingText(item.text || "", 1800);
+        const value = trainingValueScore(text);
+        const human = humanSignalScore(text);
+        return {
+          ...item,
+          text,
+          strength: clamp(Number(item.strength || 1) * 0.78 + value * 0.7 + human * 0.55, 0.05, 3),
+          quality: value,
+          humanSignal: human
+        };
+      })
+      .filter(item => item && isUsefulTrainingText(item.text || "", { minQuality: 0.34, minEntropy: 0.32, minDialogue: 0.2, minLength: 12, maxContamination: 0.34, maxRepetition: 0.42 }))
+      .sort((a, b) => (a.strength || 0) - (b.strength || 0))
       .slice(-limit);
   }
 
@@ -578,6 +650,10 @@
       this.averageEntropy = options.averageEntropy ?? 1;
       this.coherenceScore = options.coherenceScore || 0;
       this.dialogueScore = options.dialogueScore || 0;
+      this.contaminationScore = options.contaminationScore || 0;
+      this.repetitionScore = options.repetitionScore || 0;
+      this.trainingValueScore = options.trainingValueScore || 0;
+      this.humanFeedbackScore = options.humanFeedbackScore || options.metadata?.humanFeedbackScore || 0;
       this.growthGain = options.growthGain || 0;
       this.toolUseScore = options.toolUseScore || options.metadata?.toolUseScore || 0;
       this.embeddingMutationGain = options.embeddingMutationGain || 0;
@@ -664,11 +740,15 @@
         averageEntropy: this.averageEntropy,
         coherenceScore: this.coherenceScore,
         dialogueScore: this.dialogueScore,
+        contaminationScore: this.contaminationScore,
+        repetitionScore: this.repetitionScore,
+        trainingValueScore: this.trainingValueScore,
+        humanFeedbackScore: this.humanFeedbackScore,
         growthGain: this.growthGain,
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
         stableFitness: this.stableFitness || 0,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -723,11 +803,15 @@
         averageEntropy: this.averageEntropy,
         coherenceScore: this.coherenceScore,
         dialogueScore: this.dialogueScore,
+        contaminationScore: this.contaminationScore,
+        repetitionScore: this.repetitionScore,
+        trainingValueScore: this.trainingValueScore,
+        humanFeedbackScore: this.humanFeedbackScore,
         growthGain: this.growthGain,
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
         stableFitness: this.stableFitness || 0,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -1582,9 +1666,15 @@
       const generated = this.generate(prompt, 260, 0.72, { plastic: false });
       const score = coherenceScore(generated, referenceText);
       const dialogue = naturalDialogueScore(generated);
+      const contamination = metaContaminationScore(generated);
+      const repetition = repetitionScore(generated);
+      const value = trainingValueScore(generated);
       this.coherenceScore = clamp((this.coherenceScore || 0) * 0.65 + score * 0.35, 0, 1);
       this.dialogueScore = clamp((this.dialogueScore || 0) * 0.6 + dialogue * 0.4, 0, 1);
-      return { score: this.coherenceScore, dialogue: this.dialogueScore, generated };
+      this.contaminationScore = clamp((this.contaminationScore || 0) * 0.6 + contamination * 0.4, 0, 1);
+      this.repetitionScore = clamp((this.repetitionScore || 0) * 0.6 + repetition * 0.4, 0, 1);
+      this.trainingValueScore = clamp((this.trainingValueScore || 0) * 0.6 + value * 0.4, 0, 1);
+      return { score: this.coherenceScore, dialogue: this.dialogueScore, contamination: this.contaminationScore, repetition: this.repetitionScore, value: this.trainingValueScore, generated };
     }
 
     generate(prompt, length = 420, temperature = 0.9, options = {}) {
@@ -2133,6 +2223,8 @@
     addCorpus(name, text, difficulty = 1) {
       const cleaned = cleanTrainingText(text, 1_200_000);
       if (!cleaned) return;
+      const selfGenerated = /\b(self|mirror|reflection|dream|tool|context)-?|\bself-generated\b|\bself-tune\b/i.test(name || "");
+      if (selfGenerated && trainingValueScore(cleaned) < 0.42) return false;
       this.corpora.push({
         name: name || `corpus-${this.corpora.length + 1}`,
         text: cleaned,
@@ -2140,6 +2232,7 @@
         enabled: true
       });
       this.rebuildCurriculumCorpus();
+      return true;
     }
 
     rebuildCurriculumCorpus() {
@@ -2269,10 +2362,18 @@
         : 0;
       const toolUseBonus = Math.min(0.08, Math.max(0, genome.toolUseScore || genome.metadata?.toolUseScore || 0) * 0.08);
       const memoryStabilityBonus = Math.min(0.045, Math.max(0, genome.memorySensitivity || 0) * Math.max(0, genome.coherenceScore || 0) * 0.018);
+      const naturalnessBonus = Math.min(0.18, Math.max(0, genome.trainingValueScore || 0) * 0.18);
+      const humanFeedbackBonus = Math.min(0.16, Math.max(0, genome.humanFeedbackScore || 0) * 0.16);
+      const contaminationPenalty = Math.min(0.26, Math.max(0, genome.contaminationScore || 0) * 0.26);
+      const repetitionPenalty = Math.min(0.22, Math.max(0, genome.repetitionScore || 0) * 0.22);
       genome.growthBonus = growthBonus;
       genome.healthyScaleBonus = healthyScaleBonus;
       genome.toolUseBonus = toolUseBonus;
       genome.memoryStabilityBonus = memoryStabilityBonus;
+      genome.naturalnessBonus = naturalnessBonus;
+      genome.humanFeedbackBonus = humanFeedbackBonus;
+      genome.contaminationPenalty = contaminationPenalty;
+      genome.repetitionPenalty = repetitionPenalty;
       genome.memoryBalancePenalty = memoryBalancePenalty;
       genome.memoryEnergy = memoryEnergy;
       genome.inhibitoryRatio = inhibitoryRatio;
@@ -2288,7 +2389,7 @@
 
       const scaleFloor = options.protectScale === false ? 0.18 : 0.72;
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
-      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty);
+      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + naturalnessBonus + humanFeedbackBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty) * (1 - contaminationPenalty) * (1 - repetitionPenalty);
       if (genome.origin === "immigrant" && neuronRatio < 0.55) genome.fitness *= 0.62;
       genome.stableFitness = clamp(Math.max(genome.fitness, (genome.stableFitness || 0) * 0.992), 0, Math.max(1, genome.fitness * 1.35 + 0.1));
       genome.metadata = { ...(genome.metadata || {}) };
@@ -2438,6 +2539,9 @@
 
     evolveOnce(options = {}) {
       const start = performance.now();
+      if (this.population.length < Math.min(4, this.config.populationSize)) {
+        this.ensurePopulationDiversity(Math.min(4, this.config.populationSize), { protectChampion: true, immigrantEvery: 3 });
+      }
       const autoSpiralReason = options.spiral !== false ? this.shouldTriggerSpiral() : null;
       if (autoSpiralReason) this.startSpiralPhase(autoSpiralReason);
       const spiral = this.spiralStatus();
@@ -2468,6 +2572,16 @@
         for (let i = 0; i < probeCount; i++) {
           this.population[i].evaluateCoherence(probeReference, "Answer naturally and usefully in one or two sentences.");
           this.shapeFitness(this.population[i], fitnessOptions);
+        }
+        this.population.sort((a, b) => this.selectionScore(b) - this.selectionScore(a));
+      }
+      if (this.population.length >= 6 && this.generation > 0 && this.generation % 12 === 0 && this.innovationDiversity() < 0.24) {
+        const seedSize = clamp(Math.floor((this.population[0]?.neurons || this.config.neurons) * 0.55), 400, MAX_NEURONS);
+        this.injectImmigrants(2, seedSize);
+        for (const genome of this.population.slice(-2)) {
+          if (dialogueMode) genome.evaluateDialogue(trainingText, options.dialogueMaxChars || options.maxChars || 1200);
+          else genome.evaluateText(trainingText, options.maxChars || 760);
+          this.shapeFitness(genome, fitnessOptions);
         }
         this.population.sort((a, b) => this.selectionScore(b) - this.selectionScore(a));
       }
@@ -2617,12 +2731,49 @@
       this.config.vocabSize = clamp(genome.vocabSizeTarget || genome.vocab?.length || this.config.vocabSize, PRINTABLE.length, MAX_VOCAB_SIZE);
       this.vocab = genome.vocab;
       this.population = [genome];
-      const targetPopulation = options.lazyPopulation ? 1 : this.config.populationSize;
-      while (this.population.length < targetPopulation) {
-        this.population.push(genome.clone().mutate(this.config.mutation, this.config));
-      }
+      const lazyMinimum = clamp(options.minPopulation ?? Math.min(4, this.config.populationSize), 1, this.config.populationSize);
+      const targetPopulation = options.lazyPopulation ? lazyMinimum : this.config.populationSize;
+      this.ensurePopulationDiversity(targetPopulation, { protectChampion: true, immigrantEvery: 3 });
       this.generation = genome.generation || this.generation;
       return genome;
+    }
+
+    ensurePopulationDiversity(target = this.config.populationSize, options = {}) {
+      const targetPopulation = clamp(Math.floor(target || this.config.populationSize), 1, this.config.populationSize);
+      const champion = this.population[0] || this.best();
+      if (!champion) return 0;
+      let added = 0;
+      while (this.population.length < targetPopulation) {
+        const immigrant = options.immigrantEvery && added > 0 && added % options.immigrantEvery === 0;
+        const seedNeurons = immigrant
+          ? clamp(Math.max(400, Math.floor(champion.neurons * 0.55)), 64, MAX_NEURONS)
+          : champion.neurons;
+        const seedSynapses = immigrant
+          ? clamp(Math.round(seedNeurons * Math.max(2.6, Math.min(6.5, champion.synapses / Math.max(1, champion.neurons)))), 128, MAX_SYNAPSES)
+          : champion.synapses;
+        const genome = immigrant
+          ? new NeuralGenome({
+            neurons: seedNeurons,
+            synapses: seedSynapses,
+            vocab: this.vocab,
+            vocabSizeTarget: this.config.vocabSize,
+            generation: this.generation,
+            origin: "immigrant"
+          })
+          : champion.clone();
+        genome.origin = immigrant ? "immigrant" : "evolved";
+        genome.generation = this.generation;
+        genome.mutate(this.config.mutation * (immigrant ? 1.65 : 1.15), {
+          ...this.config,
+          targetNeurons: this.config.neurons,
+          targetSynapses: this.config.synapses,
+          structuralMutationMultiplier: immigrant ? 1.8 : 1.25,
+          memoryGateMutationMultiplier: immigrant ? 1.35 : 1
+        });
+        this.population.push(genome);
+        added += 1;
+      }
+      return added;
     }
 
     tournamentSelect(pool = [], rounds = 3) {
@@ -2639,10 +2790,10 @@
       if (!champion) return { accepted: 0, bestScore: 0 };
       const reference = cleanTrainingText(trainingText || this.corpus || DEFAULT_SEED_TEXT, options.maxChars || 1200);
       const prompts = options.prompts || [
-        "Answer warmly and clearly using memory.",
-        "Explain one thing you learned from the recent context.",
-        "Respond like a coherent local AI organism.",
-        "Use a tool only if outside facts are needed."
+        "Reply warmly to a user who says hello.",
+        "Answer a user's question in one clear natural paragraph.",
+        "Recall one useful detail from the recent conversation.",
+        "Ask a gentle follow-up when the user's request is unclear."
       ];
       let bestPair = "";
       let bestScore = 0;
@@ -2695,21 +2846,29 @@
       return immigrants.length;
     }
 
-    remember(text) {
+    remember(text, options = {}) {
       if (!text || !text.trim()) return;
       const cleaned = cleanTrainingText(text, 4000);
-      if (!isUsefulTrainingText(cleaned, { minQuality: 0.3, minEntropy: 0.28, minDialogue: 0.18, minLength: 8 })) return;
+      const source = options.source || (/^(User|Human):/i.test(cleaned) ? "human" : "system");
+      const minValue = source === "human" ? 0.18 : source === "tool" ? 0.28 : 0.34;
+      if (trainingValueScore(cleaned) < minValue) return;
+      if (!isUsefulTrainingText(cleaned, { minQuality: 0.3, minEntropy: 0.28, minDialogue: 0.18, minLength: 8, maxContamination: source === "human" ? 0.52 : 0.34, maxRepetition: 0.42 })) return;
       this.recentTranscript.push({ at: Date.now(), text: cleaned.slice(0, 1400) });
       this.recentTranscript = this.recentTranscript.slice(-32);
       if (this.recentTranscript.length > 18 || this.persistentContext.length > 12000) this.consolidateConversationMemory();
       this.persistentContext = sanitizePersistentContext(`${this.persistentContext}\n${cleaned}`, 12000);
       const keywords = Array.from(keywordSet(cleaned, 24));
       if (cleaned && keywords.length) {
+        const humanSignal = humanSignalScore(cleaned);
+        const value = trainingValueScore(cleaned);
         this.memoryBank.push({
           at: Date.now(),
           text: cleaned.slice(0, 1800),
           keywords,
-          strength: 1
+          source,
+          strength: clamp((options.strength || 1) + humanSignal * 1.4 + value * 0.9, 0.1, 3),
+          quality: value,
+          humanSignal
         });
         this.memoryBank = sanitizeMemoryBank(this.memoryBank, 240);
       }
@@ -2763,6 +2922,39 @@
         .map(row => row.item.text)
         .join("\n");
       return `${summaryHit}${recalled}`.trim();
+    }
+
+    applyHumanFeedback(prompt = "", response = "", rating = 1) {
+      const cleanPrompt = cleanTrainingText(prompt, 1200);
+      const cleanResponse = cleanGeneratedText(response, 1600);
+      if (!cleanPrompt || !cleanResponse) return { accepted: false, reason: "empty" };
+      const value = trainingValueScore(cleanResponse);
+      const best = this.best();
+      if (rating > 0) {
+        const pair = formatDialoguePair(cleanPrompt, cleanResponse);
+        this.remember(`User: ${cleanPrompt}\nGenesis: ${cleanResponse}`, { source: "human", strength: 2.2 });
+        this.addCorpus(`human-approved-${Date.now()}`, pair, 1);
+        best.adaptDialogue(`${CHAT_PRIMER_TEXT}\n${pair}`, 0.024, 1000);
+        best.gradientFineTune(pair, {
+          dialogueMode: true,
+          steps: 1,
+          learningRate: Math.min(0.032, (this.config.gradientLearningRate || 0.016) * 1.55),
+          maxTokens: 260
+        });
+        best.evaluateDialogue(pair, 1000);
+        best.evaluateCoherence(pair, "Answer naturally in the user's preferred style.");
+        best.humanFeedbackScore = clamp((best.humanFeedbackScore || 0) * 0.8 + Math.max(0.35, value) * 0.2, 0, 1);
+        this.shapeFitness(best, { protectScale: true, trainingText: pair });
+        return { accepted: true, rating: 1, value, fitness: best.fitness };
+      }
+      const avoid = formatDialoguePair(cleanPrompt, "Give a clearer, more natural answer. Avoid repetition, lab-log words, and fragments.");
+      this.mirrorCorpus.push(avoid);
+      this.mirrorCorpus = this.mirrorCorpus.slice(-80);
+      best.contaminationScore = clamp((best.contaminationScore || 0) + metaContaminationScore(cleanResponse) * 0.25, 0, 1);
+      best.repetitionScore = clamp((best.repetitionScore || 0) + repetitionScore(cleanResponse) * 0.25, 0, 1);
+      best.humanFeedbackScore = clamp((best.humanFeedbackScore || 0) * 0.92 - 0.05, 0, 1);
+      this.shapeFitness(best, { protectScale: true, trainingText: avoid });
+      return { accepted: true, rating: -1, value, fitness: best.fitness };
     }
 
     dreamReplay(options = {}) {
@@ -2874,6 +3066,10 @@
     formatDialoguePair,
     chatQualityScore,
     textEntropy,
+    repetitionScore,
+    metaContaminationScore,
+    humanSignalScore,
+    trainingValueScore,
     coherenceScore,
     ngramOverlapScore,
     naturalDialogueScore,

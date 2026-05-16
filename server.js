@@ -30,7 +30,7 @@ const serverModelPath = path.join(dataDir, "server-model.json");
 const serverLastGoodPath = path.join(dataDir, "server-model.last-good.json");
 const toolLogPath = path.join(dataDir, "tool-use.log");
 const bundledSeedModelPath = path.join(root, "genesis-lab-generation-3431.json");
-const { EvolutionLab, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, cleanGeneratedText, cleanTrainingText, dialogueTrainingText, chatQualityScore, textEntropy, naturalDialogueScore, isUsefulTrainingText, sanitizePersistentContext, sanitizeMemoryBank } = global.GenesisEngine;
+const { EvolutionLab, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, cleanGeneratedText, cleanTrainingText, dialogueTrainingText, chatQualityScore, textEntropy, naturalDialogueScore, isUsefulTrainingText, sanitizePersistentContext, sanitizeMemoryBank, trainingValueScore } = global.GenesisEngine;
 
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -570,7 +570,7 @@ function selfTuneFromInspiration(topic) {
   best.plasticityRate = Math.min(0.04, (best.plasticityRate || 0.006) * 1.08 + 0.001);
   best.memorySensitivity = Math.min(2.5, (best.memorySensitivity || 1) * 1.015);
   const pair = `${CONTROL_HUMAN} Improve yourself from this inspiration: ${cleanTopic} ${CONTROL_ASSISTANT} I will preserve useful context, raise plasticity briefly, and form clearer memory links before answering. ${CONTROL_TURN_END}`;
-  serverLab.remember(pair);
+  serverLab.remember(pair, { source: "system", strength: 0.8 });
   serverLab.addCorpus(`self-tune-${Date.now()}`, pair, Math.min(10, serverLab.curriculumLevel + 1));
   return {
     source: `Self-tune:${cleanTopic.slice(0, 80)}`,
@@ -704,7 +704,7 @@ async function serverChat(prompt, options = {}, clientId = "local") {
     toolSteps.push(...inferredResults);
     const inferredContext = toolContext(inferredResults);
     context += `\n${inferredContext}\nUse this context before answering:\n`;
-    serverLab.remember(inferredContext);
+    serverLab.remember(inferredContext, { source: "tool", strength: 1.1 });
     serverLab.addCorpus(`context-tool-${Date.now()}`, inferredContext, Math.min(10, serverLab.curriculumLevel + 1));
     serverLab.best().adaptDialogue(`${CONTROL_HUMAN} Use retrieved context. ${CONTROL_ASSISTANT} ${inferredContext} ${CONTROL_TURN_END}`, 0.012, 1100);
   }
@@ -723,7 +723,7 @@ async function serverChat(prompt, options = {}, clientId = "local") {
     toolSteps.push(...results);
     const injected = toolContext(results);
     context += `\n${generated}\n${injected}\nContinue using the tool result above:\n`;
-    serverLab.remember(injected);
+    serverLab.remember(injected, { source: "tool", strength: 1.1 });
     serverLab.addCorpus(`tool-${Date.now()}`, injected, Math.min(10, serverLab.curriculumLevel + 1));
     serverLab.best().adaptDialogue(`${CONTROL_HUMAN} Use this tool result. ${CONTROL_ASSISTANT} ${injected} ${CONTROL_TURN_END}`, 0.01, 900);
   }
@@ -735,7 +735,7 @@ async function serverChat(prompt, options = {}, clientId = "local") {
       : "I am still stabilizing my chat vocabulary. Try a little more text training, then ask again.";
     serverLab.best().setVocab(serverLab.vocab);
   }
-  serverLab.remember(`User: ${safePrompt}\nNeuroGenesis: ${cleanedOutput}`);
+  serverLab.remember(`User: ${safePrompt}\nNeuroGenesis: ${cleanedOutput}`, { source: "human", strength: 1.5 });
   saveServerModel(false);
   broadcastEvent("thinking", { clientId, phase: "done", toolSteps: toolSteps.length });
   return {
@@ -756,7 +756,7 @@ async function rewardToolUseProbe() {
   const usefulChars = results.reduce((sum, result) => sum + (result.error ? 0 : result.text.length), 0);
   if (usefulChars > 300) {
     rewardEffectiveToolUse({ text: results.map(result => result.text || "").join("\n") }, "SEARCH");
-    serverLab.remember(toolContext(results));
+    serverLab.remember(toolContext(results), { source: "tool", strength: 1.1 });
   }
 }
 
@@ -801,7 +801,7 @@ async function runServerDeepReflection(reason = "manual-pause") {
     `${CONTROL_HUMAN} Deep reflection after ${reason}. Recent fitness dips: ${dipText}.`,
     `${CONTROL_ASSISTANT} I should preserve useful scale, retrieve facts with tools only when needed, answer in complete natural dialogue, and strengthen memory links before resuming training. ${CONTROL_TURN_END}`
   ].join(" ");
-  serverLab.remember(reflection);
+  serverLab.remember(reflection, { source: "system", strength: 0.9 });
   serverLab.addCorpus(`deep-reflection-${Date.now()}`, reflection, Math.min(10, serverLab.curriculumLevel + 1));
 
   const toolPrompt = [
@@ -811,7 +811,7 @@ async function runServerDeepReflection(reason = "manual-pause") {
   const tools = await executeToolCommandsFromText(toolPrompt, "deep-reflection");
   const injectedContext = toolContext(tools);
   if (injectedContext) {
-    serverLab.remember(injectedContext);
+    serverLab.remember(injectedContext, { source: "tool", strength: 1.1 });
     serverLab.addCorpus(`deep-reflection-tools-${Date.now()}`, injectedContext, Math.min(10, serverLab.curriculumLevel + 1));
   }
   const replay = serverLab.dreamReplay({
@@ -863,10 +863,10 @@ function runSelfGeneratedDataLoop() {
   if (serverEvolution.cycles % 18 !== 0) return 0;
   if ((serverLab.best().coherenceScore || 0) < 0.48 && (serverLab.best().dialogueScore || 0) < 0.48) return 0;
   const prompts = [
-    "Explain what you remember about this training run.",
-    "Give a helpful answer about local evolving neural organisms.",
-    "Describe how you should use memory and controlled tools.",
-    "Answer a user who asks how your learning improves."
+    "A user says they feel stuck. Answer warmly and practically.",
+    "A user asks you to remember something important. Reply naturally.",
+    "A user says hello after a long day. Give a short kind answer.",
+    "A user asks a factual question. Explain that you can look it up when needed."
   ];
   const candidates = [];
   for (const prompt of prompts) {
@@ -889,8 +889,9 @@ function runSelfGeneratedDataLoop() {
   for (const item of accepted) {
     const pair = `${CONTROL_HUMAN} ${item.prompt} ${CONTROL_ASSISTANT} ${item.response} ${CONTROL_TURN_END}`;
     if (!isUsefulTrainingText(pair, { minQuality: 0.56, minEntropy: 0.48, minDialogue: 0.42, minLength: 60, maxOneLetterRatio: 0.18 })) continue;
-    serverLab.addCorpus(`self-generated-${Date.now()}`, pair, Math.min(10, serverLab.curriculumLevel + 1));
-    serverLab.remember(`Self-generated training pair score ${item.score.toFixed(2)}, entropy ${item.entropy.toFixed(2)}: ${item.prompt}\n${item.response}`);
+    const added = serverLab.addCorpus(`self-generated-${Date.now()}`, pair, Math.min(10, serverLab.curriculumLevel + 1));
+    if (!added) continue;
+    serverLab.remember(`${CONTROL_HUMAN} ${item.prompt} ${CONTROL_ASSISTANT} ${item.response} ${CONTROL_TURN_END}`, { source: "system", strength: Math.max(0.7, item.score) });
     serverLab.best().fitness += Math.min(0.025, item.score * 0.01);
   }
   if (accepted.length) broadcastEvent("evolution", { generation: serverLab.generation, selfGenerated: accepted.length });
@@ -916,7 +917,7 @@ function runDreamPhase() {
     loss: result.loss,
     coherence: result.coherence
   };
-  serverLab.remember(`Dream consolidation replayed ${result.dreamed} memory traces. Coherence ${Number(result.coherence || 0).toFixed(2)}, loss ${Number(result.loss || 0).toFixed(3)}.`);
+  serverLab.remember(`Dream consolidation replayed useful memories and practiced natural conversation.`, { source: "system", strength: 0.6 });
   broadcastEvent("evolution", { generation: serverLab.generation, dream: serverEvolution.lastDream });
   return result;
 }
@@ -929,11 +930,11 @@ function sanitizeLoadedCorpora(corpora = []) {
       quarantined += 1;
       continue;
     }
-    const isSelfGenerated = /self-generated/i.test(corpus.name || "");
+    const isSelfGenerated = /\b(self-generated|self-tune|deep-reflection|mirror|dream|tool|context-tool)\b/i.test(corpus.name || "");
     const assistantText = isSelfGenerated && corpus.text.includes(CONTROL_ASSISTANT)
       ? corpus.text.split(CONTROL_ASSISTANT).slice(1).join(" ").split(CONTROL_TURN_END)[0]
       : corpus.text;
-    if (isSelfGenerated && !isUsefulTrainingText(assistantText, { minQuality: 0.56, minEntropy: 0.46, minDialogue: 0.42, minLength: 48, maxOneLetterRatio: 0.16 })) {
+    if (isSelfGenerated && (!isUsefulTrainingText(assistantText, { minQuality: 0.56, minEntropy: 0.46, minDialogue: 0.42, minLength: 48, maxOneLetterRatio: 0.16, maxContamination: 0.3, maxRepetition: 0.38 }) || trainingValueScore(assistantText) < 0.45)) {
       quarantined += 1;
       continue;
     }
@@ -1064,6 +1065,10 @@ function serverSnapshot() {
     loss: best.loss,
     coherence: best.coherenceScore || 0,
     dialogue: best.dialogueScore || 0,
+    naturalness: best.trainingValueScore || 0,
+    contamination: best.contaminationScore || 0,
+    repetition: best.repetitionScore || 0,
+    humanFeedback: best.humanFeedbackScore || 0,
     toolUseScore: best.toolUseScore || best.metadata?.toolUseScore || 0,
     growthBonus: best.growthBonus || 0,
     healthyScaleBonus: best.healthyScaleBonus || 0,
@@ -1140,9 +1145,9 @@ async function serverEvolutionTick() {
       distillEvery: 8,
       distillLearningRate: 0.018,
       distillPrompts: [
-        "Answer warmly and clearly using memory.",
-        "Explain one thing you learned from the recent context.",
-        "Respond like a coherent local AI organism."
+        "Reply warmly to a user who says hello.",
+        "Answer a user's question in one clear natural paragraph.",
+        "Recall one useful detail from the recent conversation."
       ],
       imageTargets: serverImageTargets,
       imagePrompt: serverImageTargets[serverEvolution.cycles % Math.max(1, serverImageTargets.length)]?.name || "",
@@ -1463,6 +1468,20 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/feedback" && req.method === "POST") {
+      const payload = await readBody(req);
+      const rating = Number(payload.rating || 0) >= 0 ? 1 : -1;
+      const result = serverLab.applyHumanFeedback(String(payload.prompt || ""), String(payload.response || ""), rating);
+      saveServerModel(true);
+      sendJson(res, {
+        ok: true,
+        result,
+        trainingValue: trainingValueScore(String(payload.response || "")),
+        serverEvolution: serverSnapshot()
+      });
+      return;
+    }
+
     if (url.pathname === "/api/tools/execute" && req.method === "POST") {
       const payload = await readBody(req);
       const clientId = req.socket.remoteAddress || "local";
@@ -1470,7 +1489,7 @@ const server = http.createServer(async (req, res) => {
       const tools = await executeToolCommandsFromText(text, clientId);
       const injectedContext = toolContext(tools);
       if (injectedContext) {
-        serverLab.remember(injectedContext);
+        serverLab.remember(injectedContext, { source: "tool", strength: 1.1 });
         serverLab.addCorpus(`tool-${Date.now()}`, injectedContext, Math.min(10, serverLab.curriculumLevel + 1));
         saveServerModel(false);
       }
@@ -1483,7 +1502,7 @@ const server = http.createServer(async (req, res) => {
       const rawUrl = url.searchParams.get("url") || "";
       const result = await executeToolCommand({ kind: "YOUTUBE", value: rawUrl, raw: `[YOUTUBE:${rawUrl}]` }, clientId);
       const injectedContext = toolContext([result]);
-      serverLab.remember(injectedContext);
+      serverLab.remember(injectedContext, { source: "tool", strength: 1.1 });
       serverLab.addCorpus(`youtube-${Date.now()}`, injectedContext, Math.min(10, serverLab.curriculumLevel + 1));
       saveServerModel(false);
       sendJson(res, { ok: true, result, injectedContext, serverEvolution: serverSnapshot() });

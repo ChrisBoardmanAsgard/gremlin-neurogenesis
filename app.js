@@ -1,5 +1,5 @@
 (function () {
-  const { EvolutionLab, NeuralGenome, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, MAX_NEURONS, MAX_SYNAPSES, DEFAULT_VOCAB_SIZE, clamp, cleanGeneratedText, chatQualityScore, isUsefulTrainingText, sanitizePersistentContext, sanitizeMemoryBank } = window.GenesisEngine;
+  const { EvolutionLab, NeuralGenome, DEFAULT_SEED_TEXT, CHAT_PRIMER_TEXT, CONTROL_HUMAN, CONTROL_ASSISTANT, CONTROL_TURN_END, MAX_NEURONS, MAX_SYNAPSES, DEFAULT_VOCAB_SIZE, clamp, cleanGeneratedText, chatQualityScore, isUsefulTrainingText, sanitizePersistentContext, sanitizeMemoryBank, trainingValueScore } = window.GenesisEngine;
 
   const el = id => document.getElementById(id);
   const state = {
@@ -23,6 +23,7 @@
     dreaming: false,
     deepDreaming: false,
     reflecting: false,
+    lastChatPair: null,
     lastMemoryPressureLog: 0,
     statusTimer: 0
   };
@@ -105,11 +106,11 @@
     let quarantined = 0;
     const cleaned = [];
     for (const corpus of corpora || []) {
-      const isSelfGenerated = /self-generated/i.test(corpus?.name || "");
+      const isSelfGenerated = /\b(self-generated|self-tune|deep-reflection|mirror|dream|tool|context-tool)\b/i.test(corpus?.name || "");
       const assistantText = isSelfGenerated && String(corpus?.text || "").includes(CONTROL_ASSISTANT)
         ? String(corpus.text).split(CONTROL_ASSISTANT).slice(1).join(" ").split(CONTROL_TURN_END)[0]
         : corpus?.text || "";
-      if (isSelfGenerated && !isUsefulTrainingText(assistantText, { minQuality: 0.56, minEntropy: 0.46, minDialogue: 0.42, minLength: 48, maxOneLetterRatio: 0.16 })) {
+      if (isSelfGenerated && (!isUsefulTrainingText(assistantText, { minQuality: 0.56, minEntropy: 0.46, minDialogue: 0.42, minLength: 48, maxOneLetterRatio: 0.16, maxContamination: 0.3, maxRepetition: 0.38 }) || (trainingValueScore && trainingValueScore(assistantText) < 0.45))) {
         quarantined += 1;
         continue;
       }
@@ -225,6 +226,10 @@
       vocab: state.lab.vocab.length,
       fitness: best?.fitness,
       loss: best?.loss,
+      naturalness: best?.trainingValueScore || 0,
+      contamination: best?.contaminationScore || 0,
+      repetition: best?.repetitionScore || 0,
+      humanFeedback: best?.humanFeedbackScore || 0,
       corpusChars: state.lab.corpus.length,
       imageTargets: state.imageTargets.length,
       visualTrainingActive: state.imageTargets.length > 0,
@@ -1063,7 +1068,9 @@
         });
         const payload = await response.json();
         if (!payload.ok) throw new Error(payload.error || "Server chat failed");
-        model.textContent = safeChatText(payload.text || payload.raw || "", chatFallbackFor(prompt));
+        const generated = safeChatText(payload.text || payload.raw || "", chatFallbackFor(prompt));
+        model.textContent = generated;
+        state.lastChatPair = { prompt, response: generated };
         if (payload.tools?.length) {
           const toolNote = document.createElement("div");
           toolNote.className = "message model";
@@ -1078,13 +1085,15 @@
         state.lab.best().adaptDialogue(localPrimer, 0.02, 850);
         const generated = safeChatText(state.lab.best().generate(prompt, length, temperature), chatFallbackFor(prompt));
         model.textContent = generated;
-        state.lab.remember(`User: ${prompt}\nGenesis: ${generated}`);
+        state.lastChatPair = { prompt, response: generated };
+        state.lab.remember(`User: ${prompt}\nGenesis: ${generated}`, { source: "human", strength: 1.4 });
       }
     } else {
       state.lab.best().adaptDialogue(localPrimer, 0.02, 850);
       const generated = safeChatText(state.lab.best().generate(prompt, length, temperature), chatFallbackFor(prompt));
       model.textContent = generated;
-      state.lab.remember(`User: ${prompt}\nGenesis: ${generated}`);
+      state.lastChatPair = { prompt, response: generated };
+      state.lab.remember(`User: ${prompt}\nGenesis: ${generated}`, { source: "human", strength: 1.4 });
       setToolStatus("Local-only mode. Launch the server to enable controlled internet sense.");
     }
     el("chatHistory").scrollTop = el("chatHistory").scrollHeight;
@@ -1093,8 +1102,33 @@
 
   function rememberConversation() {
     const text = Array.from(document.querySelectorAll(".message")).map(node => node.textContent).join("\n");
-    state.lab.remember(text);
+    state.lab.remember(text, { source: "human", strength: 1.5 });
     log("Stored chat context in persistent organism memory.");
+    updateReadout();
+  }
+
+  async function rateLastReply(rating) {
+    if (!state.lastChatPair) {
+      log("No recent reply to rate yet.");
+      return;
+    }
+    const { prompt, response } = state.lastChatPair;
+    const localResult = state.lab.applyHumanFeedback(prompt, response, rating);
+    const quality = trainingValueScore ? trainingValueScore(response) : 0;
+    log(rating > 0
+      ? `Human reward applied. Natural dialogue score ${quality.toFixed(2)}; champion fitness ${Number(localResult.fitness || 0).toFixed(4)}.`
+      : `Human correction applied. Gremlin will avoid that pattern; mirror corpus now has ${state.lab.mirrorCorpus.length} correction item(s).`);
+    if (state.serverChatAvailable) {
+      try {
+        await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, response, rating })
+        });
+      } catch (error) {
+        log(`Server feedback skipped: ${error.message}`);
+      }
+    }
     updateReadout();
   }
 
@@ -1864,6 +1898,8 @@
     el("chatButton").addEventListener("click", generateChat);
     el("speechButton").addEventListener("click", startSpeechInput);
     el("rememberChatButton").addEventListener("click", rememberConversation);
+    if (el("goodReplyButton")) el("goodReplyButton").addEventListener("click", () => rateLastReply(1).catch(error => log(`Feedback failed: ${error.message}`)));
+    if (el("badReplyButton")) el("badReplyButton").addEventListener("click", () => rateLastReply(-1).catch(error => log(`Feedback failed: ${error.message}`)));
     el("renderImageButton").addEventListener("click", renderImage);
     el("seeImageButton").addEventListener("click", seeImageTarget);
     el("evolveImageButton").addEventListener("click", evolveImage);
