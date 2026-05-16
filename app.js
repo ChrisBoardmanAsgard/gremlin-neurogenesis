@@ -295,8 +295,10 @@
     ctx.fillRect(0, 0, width, height);
     const buckets = activity.buckets || [];
     const cell = width / Math.max(1, buckets.length);
+    const noisePressure = Number(activity.noisePressure || 0);
+    const activityScale = 0.38 + Math.min(1, noisePressure) * 0.62;
     for (let i = 0; i < buckets.length; i++) {
-      const value = buckets[i];
+      const value = buckets[i] * activityScale;
       const hue = 88 + value * 90;
       ctx.fillStyle = `hsl(${hue} 80% ${24 + value * 48}%)`;
       ctx.fillRect(i * cell, height - value * height, Math.max(1, cell - 1), value * height);
@@ -311,7 +313,6 @@
     const memoryMean = Number(activity.memoryMean || 0);
     const memorySaturation = Number(activity.memorySaturation || 0);
     const memoryState = memorySaturation > 0.35 ? "heavy" : memoryMean > 0.22 ? "active" : "light";
-    const noisePressure = Number(activity.noisePressure || 0);
     const inhibitoryBrake = Number(activity.inhibitoryBrake || 0);
     ctx.fillText(`memory state: ${memoryState} avg ${memoryMean.toFixed(2)} sat ${(memorySaturation * 100).toFixed(0)}%`, 12, 18);
     ctx.fillText(`memory cells: ${memoryLabel}`, 12, 36);
@@ -1293,6 +1294,18 @@
     updateReadout();
   }
 
+  function focusCurrentCorpus() {
+    const text = el("corpusText").value;
+    const name = el("corpusName").value || "focused sample";
+    saveBrowserCheckpoint("before-focus-sample");
+    state.evolving = false;
+    state.lab.focusCorpus(text, name);
+    invalidateActivityCache();
+    readyToTrain();
+    log(`Focused on "${name}" only. Cleared long-term gist, recent transcript, memory bank, and enabled repair-prune bias so the small sample is not mixed with old context.`);
+    updateReadout();
+  }
+
   function recentFitnessDips(limit = 5) {
     const points = (state.lab.history || []).filter(point => point && Number.isFinite(point.fitness)).slice(-160);
     if (points.length < 6) return [];
@@ -1757,6 +1770,7 @@
     el("wikiButton").addEventListener("click", importWikipedia);
     el("wikiBatchButton").addEventListener("click", importWikipediaBatch);
     el("addCorpusButton").addEventListener("click", addCurrentCorpus);
+    el("focusCorpusButton").addEventListener("click", focusCurrentCorpus);
     el("fileInput").addEventListener("change", event => handleFiles(event.target.files));
 
     const drop = document.querySelector(".drop-zone");

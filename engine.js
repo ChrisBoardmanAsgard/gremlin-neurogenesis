@@ -2018,6 +2018,33 @@
       for (const genome of this.population) genome.setVocab(this.vocab);
     }
 
+    clearConversationMemory(options = {}) {
+      if (options.keepSummary !== true) this.memorySummary = "";
+      this.recentTranscript = [];
+      this.persistentContext = "";
+      this.memoryBank = [];
+      const calmStrength = clamp(Number(options.calmStrength ?? 0.16), 0, 0.35);
+      for (const genome of this.population) {
+        if (genome?.calmMemoryGates) genome.calmMemoryGates(calmStrength);
+        genome.memoryBalancePenalty = 0;
+        genome.memoryEnergy = 0;
+      }
+      return { memoryBank: this.memoryBank.length, summaryChars: this.memorySummary.length };
+    }
+
+    focusCorpus(text, name = "focused sample") {
+      const cleaned = cleanTrainingText(text, 2_500_000) || DEFAULT_SEED_TEXT;
+      this.corpora = [{ name, text: cleaned, difficulty: 1, enabled: true }];
+      this.corpus = cleaned;
+      this.clearConversationMemory({ calmStrength: 0.2 });
+      this.vocab = makeVocab(this.corpus, this.config.vocabSize);
+      for (const genome of this.population) genome.setVocab(this.vocab);
+      this.curriculumLevel = 1;
+      this.history = [];
+      if (this.triggerMemoryRepair) this.triggerMemoryRepair(80);
+      return this.corpus;
+    }
+
     addCorpus(name, text, difficulty = 1) {
       const cleaned = cleanTrainingText(text, 1_200_000);
       if (!cleaned) return;
