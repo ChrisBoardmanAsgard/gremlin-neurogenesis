@@ -629,12 +629,13 @@
     setStatus("Curriculum loaded");
   }
 
-  function readFileAsText(file) {
+  function readFileAsText(file, options = {}) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => {
         const text = String(reader.result || "");
-        resolve(text.length > MAX_IMPORTED_TEXT_CHARS ? text.slice(0, MAX_IMPORTED_TEXT_CHARS) : text);
+        const maxChars = options.maxChars === Infinity ? Infinity : Number(options.maxChars ?? MAX_IMPORTED_TEXT_CHARS);
+        resolve(Number.isFinite(maxChars) && text.length > maxChars ? text.slice(0, maxChars) : text);
       };
       reader.onerror = () => reject(reader.error);
       reader.readAsText(file);
@@ -955,8 +956,16 @@
   }
 
   async function importModel(file) {
-    const text = await readFileAsText(file);
-    const data = JSON.parse(text);
+    const text = await readFileAsText(file, { maxChars: Infinity });
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      if (text.length === MAX_IMPORTED_TEXT_CHARS) {
+        throw new Error("Model JSON appears truncated at the old text-import limit. Please reload the page and try again with the fixed importer.");
+      }
+      throw new Error(`Model JSON could not be parsed: ${error.message}`);
+    }
     const champion = data.champion || data.genome || (data.neurons && data.synapses ? data : null);
     if (!champion) throw new Error("No champion genome found");
     const nextLab = new EvolutionLab();
