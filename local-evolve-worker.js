@@ -31,6 +31,7 @@ self.onmessage = event => {
       corpus: job.corpus,
       corpora: job.corpora,
       persistentContext: job.persistentContext,
+      userProfile: job.userProfile,
       memorySummary: job.memorySummary,
       recentTranscript: job.recentTranscript,
       memoryBank: job.memoryBank,
@@ -44,6 +45,7 @@ self.onmessage = event => {
     lab.generation = job.generation || lab.generation;
     if (Array.isArray(job.corpora)) lab.corpora = job.corpora;
     if (typeof job.persistentContext === "string") lab.persistentContext = job.persistentContext;
+    if (typeof job.userProfile === "string") lab.userProfile = job.userProfile;
     if (typeof job.memorySummary === "string") lab.memorySummary = job.memorySummary;
     if (Array.isArray(job.recentTranscript)) lab.recentTranscript = job.recentTranscript.slice(-32);
     if (Array.isArray(job.memoryBank)) lab.memoryBank = job.memoryBank.slice(-240);
@@ -74,6 +76,7 @@ self.onmessage = event => {
       corpus: lab.corpus,
       corpora: lab.corpora,
       persistentContext: lab.persistentContext,
+      userProfile: lab.userProfile,
       memorySummary: lab.memorySummary,
       recentTranscript: lab.recentTranscript,
       memoryBank: lab.memoryBank,

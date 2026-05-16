@@ -137,6 +137,7 @@
         corpus: state.lab.corpus,
         corpora: state.lab.corpora,
         persistentContext: state.lab.persistentContext,
+        userProfile: state.lab.userProfile,
         memorySummary: state.lab.memorySummary,
         recentTranscript: state.lab.recentTranscript,
         memoryBank: state.lab.memoryBank,
@@ -237,6 +238,7 @@
       curriculumLevel: state.lab.curriculumLevel,
       spiralMode: spiral,
       mirrorCorpus: state.lab.mirrorCorpus?.length || 0,
+      userProfileChars: state.lab.userProfile?.length || 0,
       species: state.lab.species.length,
       personality: Array.from(best?.personality || []).slice(0, 6).map(value => Number(value.toFixed(3))),
       maxNeuronLimit: MAX_NEURONS,
@@ -694,6 +696,7 @@
         state.lab.corpus = payload.corpus;
         state.lab.corpora = payload.corpora;
         state.lab.persistentContext = payload.persistentContext || "";
+        state.lab.userProfile = payload.userProfile || state.lab.userProfile || "";
         state.lab.memorySummary = payload.memorySummary || state.lab.memorySummary || "";
         if (Array.isArray(payload.recentTranscript)) state.lab.recentTranscript = payload.recentTranscript.slice(-32);
         if (Array.isArray(payload.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.memoryBank, 240);
@@ -720,6 +723,7 @@
         corpus: state.lab.corpus,
         corpora: state.lab.corpora,
         persistentContext: state.lab.persistentContext,
+        userProfile: state.lab.userProfile,
         memorySummary: state.lab.memorySummary,
         recentTranscript: state.lab.recentTranscript,
         memoryBank: state.lab.memoryBank,
@@ -1479,6 +1483,7 @@
       corpus: state.lab.corpus,
       corpora: sanitizeCorpora(state.lab.corpora).corpora,
       persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
+      userProfile: sanitizePersistentContext(state.lab.userProfile || "", 3000),
       memorySummary: sanitizePersistentContext(state.lab.memorySummary || "", 6000),
       recentTranscript: (state.lab.recentTranscript || []).slice(-32),
       memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
@@ -1531,6 +1536,7 @@
       if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) during import.`);
     }
     if (typeof data.persistentContext === "string") nextLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
+    if (typeof data.userProfile === "string") nextLab.userProfile = sanitizePersistentContext(data.userProfile, 3000);
     if (typeof data.memorySummary === "string") nextLab.memorySummary = sanitizePersistentContext(data.memorySummary, 6000);
     if (Array.isArray(data.recentTranscript)) nextLab.recentTranscript = data.recentTranscript.slice(-32);
     if (Array.isArray(data.memoryBank)) nextLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
@@ -1649,6 +1655,7 @@
       corpus: state.lab.corpus,
       corpora: sanitizeCorpora(state.lab.corpora).corpora,
       persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
+      userProfile: sanitizePersistentContext(state.lab.userProfile || "", 3000),
       memorySummary: sanitizePersistentContext(state.lab.memorySummary || "", 6000),
       recentTranscript: (state.lab.recentTranscript || []).slice(-32),
       memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
@@ -1736,6 +1743,7 @@
       if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) from the server pull.`);
     }
     if (typeof payload.model.persistentContext === "string") state.lab.persistentContext = sanitizePersistentContext(payload.model.persistentContext, 16000);
+    if (typeof payload.model.userProfile === "string") state.lab.userProfile = sanitizePersistentContext(payload.model.userProfile, 3000);
     if (typeof payload.model.memorySummary === "string") state.lab.memorySummary = sanitizePersistentContext(payload.model.memorySummary, 6000);
     if (Array.isArray(payload.model.recentTranscript)) state.lab.recentTranscript = payload.model.recentTranscript.slice(-32);
     if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.model.memoryBank, 240);

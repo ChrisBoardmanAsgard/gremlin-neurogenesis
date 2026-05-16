@@ -648,6 +648,8 @@
       this.selfTuningGain = options.selfTuningGain || 0;
       this.outputLength = options.outputLength || 0;
       this.averageEntropy = options.averageEntropy ?? 1;
+      this.averageTokenChars = options.averageTokenChars || 1;
+      this.subwordSpanScore = options.subwordSpanScore || 0;
       this.coherenceScore = options.coherenceScore || 0;
       this.dialogueScore = options.dialogueScore || 0;
       this.contaminationScore = options.contaminationScore || 0;
@@ -738,6 +740,8 @@
         selfTuningGain: this.selfTuningGain,
         outputLength: this.outputLength,
         averageEntropy: this.averageEntropy,
+        averageTokenChars: this.averageTokenChars,
+        subwordSpanScore: this.subwordSpanScore,
         coherenceScore: this.coherenceScore,
         dialogueScore: this.dialogueScore,
         contaminationScore: this.contaminationScore,
@@ -801,6 +805,8 @@
         selfTuningGain: this.selfTuningGain,
         outputLength: this.outputLength,
         averageEntropy: this.averageEntropy,
+        averageTokenChars: this.averageTokenChars,
+        subwordSpanScore: this.subwordSpanScore,
         coherenceScore: this.coherenceScore,
         dialogueScore: this.dialogueScore,
         contaminationScore: this.contaminationScore,
@@ -1445,6 +1451,7 @@
       let loss = 0;
       let entropy = 0;
       let seen = 0;
+      let tokenChars = 0;
       for (let i = 0; i < tokens.length - 1; i++) {
         const target = tokens[i + 1] ?? this.tokenToIndex.get(" ") ?? 0;
         this.inputToken(state, tokens[i]);
@@ -1452,11 +1459,14 @@
         const stats = softmaxStats(this.logits(state, memory), target);
         loss += stats.loss;
         entropy += stats.entropy;
+        tokenChars += Math.max(1, cleanGeneratedText(this.vocab[target] || " ", 40).length || 1);
         seen += 1;
       }
       this.loss = seen > 1 ? loss / seen : 12;
       this.outputLength = seen;
       this.averageEntropy = seen ? entropy / seen : 0;
+      this.averageTokenChars = seen ? tokenChars / seen : 1;
+      this.subwordSpanScore = clamp((this.averageTokenChars - 1) / 5, 0, 1);
       this.baseFitness = 1 / (1 + this.loss);
       this.fitness = this.baseFitness;
       return this.fitness;
@@ -1470,6 +1480,7 @@
       let loss = 0;
       let entropy = 0;
       let seen = 0;
+      let tokenChars = 0;
       let assistantMode = false;
       for (let i = 0; i < tokens.length - 1; i++) {
         const char = this.vocab[tokens[i]] || " ";
@@ -1485,6 +1496,7 @@
           const stats = softmaxStats(this.logits(state, memory), target);
           loss += stats.loss;
           entropy += stats.entropy;
+          tokenChars += Math.max(1, cleanGeneratedText(nextChar || " ", 40).length || 1);
           seen += 1;
         }
       }
@@ -1496,6 +1508,8 @@
       }
       this.outputLength = seen;
       this.averageEntropy = seen ? entropy / seen : 0;
+      this.averageTokenChars = seen ? tokenChars / seen : 1;
+      this.subwordSpanScore = clamp((this.averageTokenChars - 1) / 5, 0, 1);
       this.baseFitness = 1 / (1 + this.loss);
       this.fitness = this.baseFitness;
       if (seen < 8) this.fitness *= 0.22;
@@ -2060,6 +2074,7 @@
         ? config.corpora
         : [{ name: "seed", text: this.corpus, difficulty: 1, enabled: true }];
       this.persistentContext = config.persistentContext || "";
+      this.userProfile = sanitizePersistentContext(config.userProfile || "", 3000);
       this.memorySummary = cleanTrainingText(config.memorySummary || "", 6000);
       this.recentTranscript = Array.isArray(config.recentTranscript) ? config.recentTranscript.slice(-24) : [];
       this.memoryBank = Array.isArray(config.memoryBank) ? config.memoryBank.slice(-240) : [];
@@ -2091,7 +2106,10 @@
       const current = Number.isFinite(genome.fitness) ? genome.fitness : 0;
       const stable = Number.isFinite(genome.stableFitness) ? genome.stableFitness : 0;
       const best = Number.isFinite(genome.metadata?.bestFitness) ? genome.metadata.bestFitness : 0;
-      return Math.max(current, stable * 0.992, best * 0.975);
+      const protectedUntil = Number(genome.metadata?.protectedUntil || 0);
+      const protection = protectedUntil > this.generation ? 0.08 + Math.min(0.08, (protectedUntil - this.generation) / 300) : 0;
+      const diversityBonus = genome.origin === "immigrant" ? Math.min(0.06, Math.max(0, genome.metadata?.diversityCredit || 0.03)) : 0;
+      return Math.max(current, stable * 0.992, best * 0.975) + protection + diversityBonus;
     }
 
     spiralStatus() {
@@ -2131,12 +2149,12 @@
         const first = recent[0].fitness || 0;
         const last = recent[recent.length - 1].fitness || 0;
         const delta = first > 0 ? (last - first) / first : 0;
-        if (delta < 0.008) return `fitness plateau ${delta.toFixed(3)} over ${recent.length} generations`;
+        if (delta < 0.012) return `fitness plateau ${delta.toFixed(3)} over ${recent.length} generations`;
       }
       const diversity = this.innovationDiversity();
-      if (diversity < 0.18 && this.population.length >= 6) return `innovation diversity low ${diversity.toFixed(2)}`;
-      const summaryEntropy = textEntropy(this.memorySummary || "");
-      if ((this.memorySummary || "").length > 400 && summaryEntropy < 0.42) return `memory summary stale entropy ${summaryEntropy.toFixed(2)}`;
+      if (diversity < 0.25 && this.population.length >= 6) return `innovation diversity low ${diversity.toFixed(2)}`;
+      const summaryEntropy = textEntropy(`${this.memorySummary}\n${this.userProfile || ""}`);
+      if ((this.memorySummary || this.userProfile || "").length > 400 && summaryEntropy < 0.46) return `memory summary stale entropy ${summaryEntropy.toFixed(2)}`;
       return null;
     }
 
@@ -2251,7 +2269,7 @@
       const mirrorText = this.spiralStatus().active
         ? this.mirrorCorpus.slice(-24).join("\n")
         : this.mirrorCorpus.slice(-6).join("\n");
-      const source = `${this.memorySummary}\n${this.persistentContext}\n${mirrorText}\n${this.corpus}`;
+      const source = `${this.userProfile}\n${this.memorySummary}\n${this.persistentContext}\n${mirrorText}\n${this.corpus}`;
       if (source.length <= maxChars) return source;
       const window = Math.max(maxChars, 120);
       const offset = (this.generation * 997) % Math.max(1, source.length - window);
@@ -2316,14 +2334,20 @@
       if (!hasUsableLoss) crossEntropyFitness = Math.min(crossEntropyFitness, 0.035);
       const outputLength = Math.max(0, genome.outputLength || 0);
       const averageEntropy = clamp(Number.isFinite(genome.averageEntropy) ? genome.averageEntropy : 1, 0, 1);
-      const lengthBonus = Math.log(1 + outputLength) * 0.012;
-      const entropyBonus = -0.08 * (1 - averageEntropy);
-      const responseMultiplier = clamp(1 + lengthBonus + entropyBonus, 0.82, 1.22);
+      const averageTokenChars = clamp(Number.isFinite(genome.averageTokenChars) ? genome.averageTokenChars : 1, 1, 8);
+      const subwordSpanScore = clamp(Number.isFinite(genome.subwordSpanScore) ? genome.subwordSpanScore : ((averageTokenChars - 1) / 5), 0, 1);
+      const charSpan = outputLength * averageTokenChars;
+      const lengthBonus = Math.log(1 + charSpan) * 0.014;
+      const entropyCenter = 0.62;
+      const entropyBonus = 0.06 - Math.abs(averageEntropy - entropyCenter) * 0.15;
+      const subwordBonus = subwordSpanScore * 0.105;
+      const responseMultiplier = clamp(1 + lengthBonus + entropyBonus + subwordBonus, 0.76, 1.34);
       const imageFitness = hasUsableLoss ? Math.max(0, evaluatedFitness - crossEntropyFitness) : 0;
       const shapedBase = crossEntropyFitness * responseMultiplier + imageFitness;
       genome.baseFitness = shapedBase;
       genome.lengthBonus = lengthBonus;
       genome.entropyBonus = entropyBonus;
+      genome.subwordBonus = subwordBonus;
 
       const neuronRatio = clamp(genome.neurons / targetNeurons, 0.08, 1.35);
       const synapseRatio = clamp(genome.synapses / targetSynapses, 0.08, 1.45);
@@ -2363,7 +2387,8 @@
       const toolUseBonus = Math.min(0.08, Math.max(0, genome.toolUseScore || genome.metadata?.toolUseScore || 0) * 0.08);
       const memoryStabilityBonus = Math.min(0.045, Math.max(0, genome.memorySensitivity || 0) * Math.max(0, genome.coherenceScore || 0) * 0.018);
       const naturalnessBonus = Math.min(0.18, Math.max(0, genome.trainingValueScore || 0) * 0.18);
-      const humanFeedbackBonus = Math.min(0.16, Math.max(0, genome.humanFeedbackScore || 0) * 0.16);
+      const userProfileBonus = this.userProfile ? Math.min(0.14, Math.max(0, genome.coherenceScore || 0) * 0.07 + Math.max(0, genome.humanFeedbackScore || 0) * 0.09) : 0;
+      const humanFeedbackBonus = Math.min(0.32, Math.max(0, genome.humanFeedbackScore || 0) * 0.32);
       const contaminationPenalty = Math.min(0.26, Math.max(0, genome.contaminationScore || 0) * 0.26);
       const repetitionPenalty = Math.min(0.22, Math.max(0, genome.repetitionScore || 0) * 0.22);
       genome.growthBonus = growthBonus;
@@ -2372,6 +2397,7 @@
       genome.memoryStabilityBonus = memoryStabilityBonus;
       genome.naturalnessBonus = naturalnessBonus;
       genome.humanFeedbackBonus = humanFeedbackBonus;
+      genome.userProfileBonus = userProfileBonus;
       genome.contaminationPenalty = contaminationPenalty;
       genome.repetitionPenalty = repetitionPenalty;
       genome.memoryBalancePenalty = memoryBalancePenalty;
@@ -2389,8 +2415,9 @@
 
       const scaleFloor = options.protectScale === false ? 0.18 : 0.72;
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
-      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + naturalnessBonus + humanFeedbackBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty) * (1 - contaminationPenalty) * (1 - repetitionPenalty);
-      if (genome.origin === "immigrant" && neuronRatio < 0.55) genome.fitness *= 0.62;
+      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + naturalnessBonus + humanFeedbackBonus + userProfileBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty) * (1 - contaminationPenalty) * (1 - repetitionPenalty);
+      const immigrantProtected = genome.origin === "immigrant" && Number(genome.metadata?.protectedUntil || 0) > this.generation;
+      if (genome.origin === "immigrant" && neuronRatio < 0.55 && !immigrantProtected) genome.fitness *= 0.62;
       genome.stableFitness = clamp(Math.max(genome.fitness, (genome.stableFitness || 0) * 0.992), 0, Math.max(1, genome.fitness * 1.35 + 0.1));
       genome.metadata = { ...(genome.metadata || {}) };
       genome.metadata.bestFitness = Math.max(genome.metadata.bestFitness || 0, genome.fitness || 0);
@@ -2592,7 +2619,7 @@
       }
       const species = this.speciate();
       const champion = this.population[0].clone();
-      const spiralMutationBoost = spiral.active ? 1.72 : 1;
+      const spiralMutationBoost = spiral.active ? 2.35 : 1;
       const mutationRate = clamp(this.config.mutation * (options.mutationMultiplier || 1) * spiralMutationBoost, 0.001, 0.25);
       if (dialogueMode) {
         const beforeLoss = champion.loss;
@@ -2636,9 +2663,11 @@
       let mirrorResult = { accepted: 0, novelty: 0, bestScore: 0, mirrorCorpus: this.mirrorCorpus.length };
       if (spiral.active) {
         mirrorResult = this.runMirrorLoop(champion, trainingText, {
-          maxPrompts: options.mirrorPrompts || 3,
-          maxOutput: options.mirrorMaxOutput || 300,
-          gradientSteps: options.mirrorGradientSteps ?? 1
+          maxPrompts: options.mirrorPrompts || 4,
+          maxOutput: options.mirrorMaxOutput || 360,
+          gradientSteps: options.mirrorGradientSteps ?? 1,
+          excitation: 0.39,
+          plasticityBoost: 1.75
         });
         this.shapeFitness(champion, fitnessOptions);
       }
@@ -2668,8 +2697,8 @@
             targetNeurons: fitnessOptions.targetNeurons,
             targetSynapses: fitnessOptions.targetSynapses,
             scalarMutation: options.scalarMutation ?? this.config.scalarMutation,
-            structuralMutationMultiplier: spiral.active ? 1.65 : 1,
-            memoryGateMutationMultiplier: spiral.active ? 1.9 : 1
+            structuralMutationMultiplier: spiral.active ? 2.35 : 1,
+            memoryGateMutationMultiplier: spiral.active ? 2.6 : 1
           });
           next.push(parent);
         }
@@ -2685,10 +2714,28 @@
           targetNeurons: fitnessOptions.targetNeurons,
           targetSynapses: fitnessOptions.targetSynapses,
           scalarMutation: options.scalarMutation ?? this.config.scalarMutation,
-          structuralMutationMultiplier: spiral.active ? 1.65 : 1,
-          memoryGateMutationMultiplier: spiral.active ? 1.9 : 1
+          structuralMutationMultiplier: spiral.active ? 2.35 : 1,
+          memoryGateMutationMultiplier: spiral.active ? 2.6 : 1
         });
         next.push(parent);
+      }
+      const protectedImmigrants = this.population
+        .filter(genome => genome.origin === "immigrant" && Number(genome.metadata?.protectedUntil || 0) > this.generation)
+        .sort((a, b) => this.selectionScore(b) - this.selectionScore(a))
+        .slice(0, Math.min(3, Math.max(1, Math.floor(targetPopulationSize * 0.18))));
+      for (const immigrant of protectedImmigrants) {
+        if (next.some(genome => genome.id === immigrant.id)) continue;
+        const survivor = immigrant.clone();
+        survivor.generation = this.generation + 1;
+        survivor.mutate(mutationRate * 0.65, {
+          targetNeurons: fitnessOptions.targetNeurons,
+          targetSynapses: fitnessOptions.targetSynapses,
+          scalarMutation: options.scalarMutation ?? this.config.scalarMutation,
+          structuralMutationMultiplier: 1.35,
+          memoryGateMutationMultiplier: 1.2
+        });
+        if (next.length < targetPopulationSize) next.push(survivor);
+        else next[next.length - 1] = survivor;
       }
       this.population = next;
       this.generation += 1;
@@ -2733,7 +2780,7 @@
       this.population = [genome];
       const lazyMinimum = clamp(options.minPopulation ?? Math.min(4, this.config.populationSize), 1, this.config.populationSize);
       const targetPopulation = options.lazyPopulation ? lazyMinimum : this.config.populationSize;
-      this.ensurePopulationDiversity(targetPopulation, { protectChampion: true, immigrantEvery: 3 });
+      this.ensurePopulationDiversity(targetPopulation, { protectChampion: true, immigrantEvery: 2, protectionGenerations: options.lazyPopulation ? 90 : 60 });
       this.generation = genome.generation || this.generation;
       return genome;
     }
@@ -2763,12 +2810,18 @@
           : champion.clone();
         genome.origin = immigrant ? "immigrant" : "evolved";
         genome.generation = this.generation;
-        genome.mutate(this.config.mutation * (immigrant ? 1.65 : 1.15), {
+        genome.metadata = {
+          ...(genome.metadata || {}),
+          protectedUntil: this.generation + clamp(Math.floor(options.protectionGenerations || 70), 20, 180),
+          diversityCredit: immigrant ? 0.08 : 0.035
+        };
+        const passes = immigrant ? 3 : 1;
+        for (let pass = 0; pass < passes; pass++) genome.mutate(this.config.mutation * (immigrant ? 2.6 : 1.25), {
           ...this.config,
           targetNeurons: this.config.neurons,
           targetSynapses: this.config.synapses,
-          structuralMutationMultiplier: immigrant ? 1.8 : 1.25,
-          memoryGateMutationMultiplier: immigrant ? 1.35 : 1
+          structuralMutationMultiplier: immigrant ? 2.4 : 1.35,
+          memoryGateMutationMultiplier: immigrant ? 1.75 : 1
         });
         this.population.push(genome);
         added += 1;
@@ -2842,6 +2895,16 @@
         origin: "immigrant",
         fitness: 0
       }));
+      for (const genome of immigrants) {
+        genome.metadata = { ...(genome.metadata || {}), protectedUntil: this.generation + 110, diversityCredit: 0.1 };
+        for (let pass = 0; pass < 3; pass++) genome.mutate(this.config.mutation * 2.4, {
+          ...this.config,
+          targetNeurons: this.config.neurons,
+          targetSynapses: this.config.synapses,
+          structuralMutationMultiplier: 2.2,
+          memoryGateMutationMultiplier: 1.7
+        });
+      }
       this.population = this.population.slice(0, Math.max(1, this.config.populationSize - replaceCount)).concat(immigrants);
       return immigrants.length;
     }
@@ -2857,6 +2920,7 @@
       this.recentTranscript = this.recentTranscript.slice(-32);
       if (this.recentTranscript.length > 18 || this.persistentContext.length > 12000) this.consolidateConversationMemory();
       this.persistentContext = sanitizePersistentContext(`${this.persistentContext}\n${cleaned}`, 12000);
+      if (source === "human") this.updateUserProfile(cleaned);
       const keywords = Array.from(keywordSet(cleaned, 24));
       if (cleaned && keywords.length) {
         const humanSignal = humanSignalScore(cleaned);
@@ -2874,9 +2938,35 @@
       }
     }
 
+    updateUserProfile(text) {
+      const cleaned = cleanGeneratedText(text, 1400);
+      if (!cleaned) return this.userProfile;
+      const userLines = cleaned
+        .split(/\n+/)
+        .map(line => line.trim())
+        .filter(line => /^(User|Human|Chris):/i.test(line) || /\b(i want|i like|i prefer|remember|my|call me|i feel|i think)\b/i.test(line))
+        .slice(-8);
+      if (!userLines.length) return this.userProfile;
+      const source = `${this.userProfile}\n${userLines.join("\n")}`;
+      const words = source.toLowerCase().match(/[a-z0-9][a-z0-9'-]{2,}/g) || [];
+      const stop = new Set("the and for you are with that this from have into your about what when where how why can will not but all was were then than they them our out use using just very more much some been also there here after before because while should would could".split(" "));
+      const counts = new Map();
+      for (const word of words) {
+        if (stop.has(word)) continue;
+        counts.set(word, (counts.get(word) || 0) + 1);
+      }
+      const keywords = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 22).map(([word]) => word);
+      this.userProfile = sanitizePersistentContext([
+        keywords.length ? `User profile keywords: ${keywords.join(", ")}.` : "",
+        ...userLines
+      ].filter(Boolean).join("\n"), 3000);
+      return this.userProfile;
+    }
+
     consolidateConversationMemory(force = false) {
       if (!force && this.recentTranscript.length < 10 && this.persistentContext.length < 12000) return this.memorySummary;
       const source = cleanTrainingText([
+        this.userProfile,
         this.memorySummary,
         this.recentTranscript.map(item => item.text).join("\n"),
         this.persistentContext.slice(-5000)
@@ -2906,22 +2996,25 @@
 
     recallMemory(query, limit = 4) {
       const keys = keywordSet(query, 32);
+      const profileHit = this.userProfile
+        ? `[USER_PROFILE]\n${this.userProfile}\n[/USER_PROFILE]\n`
+        : "";
       const summaryHit = this.memorySummary && [...keys].some(key => this.memorySummary.toLowerCase().includes(key))
         ? `[LONG_TERM_GIST]\n${this.memorySummary}\n[/LONG_TERM_GIST]\n`
         : "";
-      if (!keys.size || !this.memoryBank.length) return summaryHit.trim();
+      if (!keys.size || !this.memoryBank.length) return `${profileHit}${summaryHit}`.trim();
       const recalled = this.memoryBank
         .map(item => {
           const overlap = item.keywords.reduce((sum, word) => sum + (keys.has(word) ? 1 : 0), 0);
           const recency = Math.max(0, 1 - (Date.now() - (item.at || 0)) / (1000 * 60 * 60 * 24 * 7));
-          return { item, score: overlap * 2 + recency + (item.strength || 0) * 0.25 };
+          return { item, score: overlap * 2 + recency + (item.strength || 0) * 0.36 + (item.humanSignal || 0) * 1.25 + (item.source === "human" ? 0.8 : 0) };
         })
         .filter(row => row.score > 0.5)
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
         .map(row => row.item.text)
         .join("\n");
-      return `${summaryHit}${recalled}`.trim();
+      return `${profileHit}${summaryHit}${recalled}`.trim();
     }
 
     applyHumanFeedback(prompt = "", response = "", rating = 1) {
@@ -2932,18 +3025,18 @@
       const best = this.best();
       if (rating > 0) {
         const pair = formatDialoguePair(cleanPrompt, cleanResponse);
-        this.remember(`User: ${cleanPrompt}\nGenesis: ${cleanResponse}`, { source: "human", strength: 2.2 });
+        this.remember(`User: ${cleanPrompt}\nGenesis: ${cleanResponse}`, { source: "human", strength: 3 });
         this.addCorpus(`human-approved-${Date.now()}`, pair, 1);
-        best.adaptDialogue(`${CHAT_PRIMER_TEXT}\n${pair}`, 0.024, 1000);
+        best.adaptDialogue(`${CHAT_PRIMER_TEXT}\n${this.userProfile || ""}\n${pair}`, 0.032, 1200);
         best.gradientFineTune(pair, {
           dialogueMode: true,
-          steps: 1,
-          learningRate: Math.min(0.032, (this.config.gradientLearningRate || 0.016) * 1.55),
-          maxTokens: 260
+          steps: 2,
+          learningRate: Math.min(0.038, (this.config.gradientLearningRate || 0.016) * 1.9),
+          maxTokens: 360
         });
         best.evaluateDialogue(pair, 1000);
         best.evaluateCoherence(pair, "Answer naturally in the user's preferred style.");
-        best.humanFeedbackScore = clamp((best.humanFeedbackScore || 0) * 0.8 + Math.max(0.35, value) * 0.2, 0, 1);
+        best.humanFeedbackScore = clamp((best.humanFeedbackScore || 0) * 0.72 + Math.max(0.42, value) * 0.38, 0, 1);
         this.shapeFitness(best, { protectScale: true, trainingText: pair });
         return { accepted: true, rating: 1, value, fitness: best.fitness };
       }
@@ -2960,7 +3053,7 @@
     dreamReplay(options = {}) {
       const champion = this.best();
       this.consolidateConversationMemory();
-      const sourceText = cleanTrainingText(`${this.memorySummary}\n${this.persistentContext}\n${this.mirrorCorpus.slice(-24).join("\n")}\n${this.corpus}`, options.sourceChars ?? 9000);
+      const sourceText = cleanTrainingText(`${this.userProfile}\n${this.memorySummary}\n${this.persistentContext}\n${this.mirrorCorpus.slice(-24).join("\n")}\n${this.corpus}`, options.sourceChars ?? 9000);
       if (!this.memoryBank.length && !sourceText) return { dreamed: 0, loss: champion.loss, coherence: champion.coherenceScore || 0, tuned: null, lossDelta: 0 };
       const count = clamp(Math.floor(options.count ?? 6), 1, 18);
       const charBudget = clamp(Math.floor(options.maxChars ?? 1100), 240, 4000);
@@ -2997,6 +3090,7 @@
         : dialogueTrainingText(sourceText, options.corpusChars ?? corpusChars);
       const replay = [
         CHAT_PRIMER_TEXT,
+        this.userProfile ? `[USER_PROFILE]\n${this.userProfile}\n[/USER_PROFILE]` : "",
         this.persistentContext.slice(-recentChars),
         memoryReplay,
         coherenceBoost,

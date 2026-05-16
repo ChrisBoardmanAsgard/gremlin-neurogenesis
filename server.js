@@ -954,6 +954,7 @@ function applyServerModelData(data = {}, source = "model") {
     }
   }
   if (typeof data.persistentContext === "string") serverLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
+  if (typeof data.userProfile === "string") serverLab.userProfile = sanitizePersistentContext(data.userProfile, 3000);
   if (typeof data.memorySummary === "string") serverLab.memorySummary = sanitizePersistentContext(data.memorySummary, 6000);
   if (Array.isArray(data.recentTranscript)) serverLab.recentTranscript = data.recentTranscript.slice(-32);
   if (Array.isArray(data.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
@@ -1011,6 +1012,7 @@ function saveServerModel(force = false) {
     corpus: serverLab.corpus,
     corpora: serverLab.corpora,
     persistentContext: sanitizePersistentContext(serverLab.persistentContext, 16000),
+    userProfile: sanitizePersistentContext(serverLab.userProfile || "", 3000),
     memorySummary: sanitizePersistentContext(serverLab.memorySummary || "", 6000),
     recentTranscript: (serverLab.recentTranscript || []).slice(-32),
     memoryBank: sanitizeMemoryBank(serverLab.memoryBank, 240),
@@ -1050,6 +1052,7 @@ function serverSnapshot() {
     corpusChars: serverLab.corpus.length,
     imageTargets: serverImageTargets.length,
     corpora: serverLab.corpora.length,
+    userProfileChars: serverLab.userProfile?.length || 0,
     history: serverLab.history.length,
     curriculumLevel: serverLab.curriculumLevel,
     species: speciesCount,
@@ -1099,6 +1102,7 @@ function applyServerPayload(payload = {}) {
   }).filter(target => target.pixels.length >= target.size * target.size * 4);
   if (Array.isArray(payload.corpora)) serverLab.corpora = payload.corpora;
   if (typeof payload.persistentContext === "string") serverLab.persistentContext = payload.persistentContext;
+  if (typeof payload.userProfile === "string") serverLab.userProfile = sanitizePersistentContext(payload.userProfile, 3000);
   if (typeof payload.memorySummary === "string") serverLab.memorySummary = sanitizePersistentContext(payload.memorySummary, 6000);
   if (Array.isArray(payload.recentTranscript)) serverLab.recentTranscript = payload.recentTranscript.slice(-32);
   if (Array.isArray(payload.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(payload.memoryBank, 240);
@@ -1391,6 +1395,7 @@ const server = http.createServer(async (req, res) => {
           corpus: serverLab.corpus,
           corpora: serverLab.corpora,
           persistentContext: serverLab.persistentContext,
+          userProfile: serverLab.userProfile,
           memorySummary: serverLab.memorySummary,
           recentTranscript: serverLab.recentTranscript,
           memoryBank: serverLab.memoryBank,
@@ -1418,6 +1423,7 @@ const server = http.createServer(async (req, res) => {
           corpus: includeCorpus ? serverLab.corpus : "",
           corpora: includeCorpus ? serverLab.corpora : [],
          persistentContext: serverLab.persistentContext,
+          userProfile: serverLab.userProfile,
           memorySummary: serverLab.memorySummary,
           recentTranscript: serverLab.recentTranscript,
           memoryBank: serverLab.memoryBank,
