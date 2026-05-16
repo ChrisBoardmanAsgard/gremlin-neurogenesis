@@ -189,13 +189,15 @@
       maxSynapses: synapseCounts.length ? Math.max(...synapseCounts) : 0,
       avgSynapses: synapseCounts.length ? Math.round(synapseCounts.reduce((sum, value) => sum + value, 0) / synapseCounts.length) : 0
     };
+    const speciesCount = Math.max(1, state.lab.species.length || (best ? 1 : 0));
+    const bestSpecies = best?.speciesId && best.speciesId !== "unassigned" ? best.speciesId : "s1";
     el("generationLabel").textContent = `Gen ${state.lab.generation}`;
     el("fitnessStat").textContent = (best?.fitness || 0).toFixed(3);
     el("corpusStat").textContent = `${formatChars(state.lab.corpus.length)} chars`;
     el("vocabStat").textContent = String(state.lab.vocab.length);
     el("lossMetric").textContent = Number.isFinite(best?.loss) && best.loss < 900 ? best.loss.toFixed(3) : "--";
     el("fitnessStat").textContent = (best?.fitness || 0).toFixed(3);
-    el("speciesMetric").textContent = best ? `${topology.bestNeurons}n best / ${topology.maxNeurons}n max` : "--";
+    el("speciesMetric").textContent = best ? `${topology.bestNeurons}n best / ${topology.maxNeurons}n max / ${bestSpecies} of ${speciesCount}` : "--";
     el("cycleMetric").textContent = state.lab.history.length ? `${state.lab.history.at(-1).elapsed}ms` : "--";
     el("neuronInput").value = state.lab.config.neurons;
     el("synapseInput").value = state.lab.config.synapses;
@@ -205,6 +207,8 @@
       neurons: best?.neurons,
       synapses: best?.synapses,
       population: state.lab.population.length,
+      speciesCount,
+      bestSpecies,
       topology,
       vocab: state.lab.vocab.length,
       fitness: best?.fitness,
@@ -1082,6 +1086,21 @@
         renderTargets();
         state.lab.remember(`DEEP Dream visual source: ${source.note}. ${source.url}`);
         log(`Loaded ${source.note} into visual memory.`);
+        if (parseYouTubeId(el("deepDreamUrl")?.value || "") && location.protocol !== "file:") {
+          try {
+            const response = await fetch(`/api/tools/youtube-transcript?url=${encodeURIComponent(el("deepDreamUrl").value)}`);
+            const payload = await response.json();
+            if (response.ok && payload.ok && payload.injectedContext) {
+              state.lab.remember(payload.injectedContext);
+              state.lab.addCorpus(`youtube-context-${Date.now()}`, payload.injectedContext, Math.min(10, state.lab.curriculumLevel + 1));
+              log(`YouTube transcript context added for Deep Dream (${formatChars(payload.result?.text?.length || 0)} chars).`);
+            } else if (payload.error) {
+              log(`YouTube transcript unavailable: ${payload.error}`);
+            }
+          } catch (error) {
+            log(`YouTube transcript unavailable: ${error.message}`);
+          }
+        }
       }
       const targets = options.lastOnly && state.lastImageTarget ? [state.lastImageTarget] : state.imageTargets.slice(-6);
       if (!targets.length) {

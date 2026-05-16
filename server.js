@@ -73,7 +73,7 @@ let serverEvolution = {
   error: null
 };
 
-const COMMAND_PATTERN = /\[(SEARCH|WIKI|FETCH):([^\]]{1,500})\]/gi;
+const COMMAND_PATTERN = /\[(SEARCH|WIKI|FETCH|YOUTUBE|TRANSCRIPT|SELF_TUNE):([^\]]{1,800})\]/gi;
 const TOOL_RATE_LIMIT = {
   windowMs: 60_000,
   maxRequests: 12
@@ -509,6 +509,73 @@ async function webSearch(query) {
   };
 }
 
+function parseYouTubeVideoId(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/i)
+    || text.match(/^[A-Za-z0-9_-]{6,}$/);
+  return match ? match[1] : "";
+}
+
+function decodeXmlEntities(text) {
+  return String(text || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code) || 32));
+}
+
+async function youtubeTranscript(rawUrl) {
+  const videoId = parseYouTubeVideoId(rawUrl);
+  if (!videoId) throw new Error("No YouTube video id found.");
+  let title = `YouTube video ${videoId}`;
+  try {
+    const oembed = await fetchJson(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`);
+    if (oembed?.title) title = cleanText(oembed.title, 180);
+  } catch {
+    // Transcript still works for many videos even when oEmbed is unavailable.
+  }
+  const listXml = await fetchText(`https://video.google.com/timedtext?type=list&v=${encodeURIComponent(videoId)}`, 120_000);
+  const tracks = [...listXml.matchAll(/<track\b[^>]*lang_code="([^"]+)"[^>]*(?:name="([^"]*)")?[^>]*>/gi)]
+    .map(match => ({ lang: decodeXmlEntities(match[1]), name: decodeXmlEntities(match[2] || "") }));
+  const preferred = tracks.find(track => /^en/i.test(track.lang)) || tracks[0];
+  if (!preferred) {
+    return {
+      source: `YouTube:${videoId}`,
+      text: cleanText(`# ${title}\nNo public transcript was found. Thumbnail context can still be used for visual Deep Dream, but spoken transcript text is unavailable.`, 1200)
+    };
+  }
+  const transcriptUrl = new URL("https://video.google.com/timedtext");
+  transcriptUrl.searchParams.set("v", videoId);
+  transcriptUrl.searchParams.set("lang", preferred.lang);
+  if (preferred.name) transcriptUrl.searchParams.set("name", preferred.name);
+  const xml = await fetchText(transcriptUrl, 1_200_000);
+  const lines = [...xml.matchAll(/<text\b[^>]*>([\s\S]*?)<\/text>/gi)]
+    .map(match => cleanText(decodeXmlEntities(match[1].replace(/\n/g, " ")), 500))
+    .filter(Boolean);
+  if (!lines.length) throw new Error("Transcript track was found but contained no readable text.");
+  return {
+    source: `YouTube transcript:${title}`,
+    text: cleanText(`# ${title}\nVideo: https://www.youtube.com/watch?v=${videoId}\nTranscript language: ${preferred.lang}\n\n${lines.join(" ")}`, 12000)
+  };
+}
+
+function selfTuneFromInspiration(topic) {
+  const cleanTopic = cleanTrainingText(topic, 500) || "recent context";
+  const best = serverLab.best();
+  best.selfTuningGain = Math.min(0.5, (best.selfTuningGain || 0) + 0.025);
+  best.plasticityRate = Math.min(0.04, (best.plasticityRate || 0.006) * 1.08 + 0.001);
+  best.memorySensitivity = Math.min(2.5, (best.memorySensitivity || 1) * 1.015);
+  const pair = `${CONTROL_HUMAN} Improve yourself from this inspiration: ${cleanTopic} ${CONTROL_ASSISTANT} I will preserve useful context, raise plasticity briefly, and form clearer memory links before answering. ${CONTROL_TURN_END}`;
+  serverLab.remember(pair);
+  serverLab.addCorpus(`self-tune-${Date.now()}`, pair, Math.min(10, serverLab.curriculumLevel + 1));
+  return {
+    source: `Self-tune:${cleanTopic.slice(0, 80)}`,
+    text: `Gremlin adjusted genome meta-parameters from inspiration: plasticity ${best.plasticityRate.toFixed(4)}, memory sensitivity ${best.memorySensitivity.toFixed(3)}, self-tuning gain ${best.selfTuningGain.toFixed(3)}.`
+  };
+}
+
 async function executeToolCommand(command, clientId = "local") {
   assertToolRateLimit(clientId);
   const value = command.value.trim();
@@ -516,6 +583,8 @@ async function executeToolCommand(command, clientId = "local") {
   if (command.kind === "WIKI") result = await wikipediaArticle(value);
   else if (command.kind === "SEARCH") result = await webSearch(value);
   else if (command.kind === "FETCH") result = await safeFetchPage(value);
+  else if (command.kind === "YOUTUBE" || command.kind === "TRANSCRIPT") result = await youtubeTranscript(value);
+  else if (command.kind === "SELF_TUNE") result = selfTuneFromInspiration(value);
   else throw new Error(`Unsupported command ${command.kind}`);
 
   appendToolLog({
@@ -564,6 +633,35 @@ function toolContext(results) {
   }).join("\n");
 }
 
+function inferContextCommands(prompt) {
+  const text = String(prompt || "");
+  const commands = [];
+  const youtube = text.match(/https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s)\]]+/i);
+  if (youtube) commands.push({ kind: "YOUTUBE", value: youtube[0], raw: `[YOUTUBE:${youtube[0]}]` });
+  const fetchUrl = text.match(/https:\/\/(?![^/\s]*youtube\.com|youtu\.be)[^\s)\]]+/i);
+  if (fetchUrl && /\b(read|fetch|summari[sz]e|look at|open)\b/i.test(text)) {
+    commands.push({ kind: "FETCH", value: fetchUrl[0], raw: `[FETCH:${fetchUrl[0]}]` });
+  }
+  if (/\b(search the web|web search|look up|latest|current|today|news|find information)\b/i.test(text)) {
+    const query = cleanTrainingText(text.replace(/https?:\/\/\S+/g, " "), 220);
+    if (query.length > 3) commands.push({ kind: "SEARCH", value: query, raw: `[SEARCH:${query}]` });
+  }
+  if (/\b(wikipedia|wiki article)\b/i.test(text)) {
+    const title = cleanTrainingText(text.replace(/\b(import|read|wikipedia|wiki article|about|please|can you)\b/gi, " "), 120);
+    if (title.length > 2) commands.push({ kind: "WIKI", value: title, raw: `[WIKI:${title}]` });
+  }
+  if (/\b(inspire|rewrite yourself|improve yourself|self[- ]?tune|learn faster)\b/i.test(text)) {
+    commands.push({ kind: "SELF_TUNE", value: cleanTrainingText(text, 300), raw: `[SELF_TUNE:${cleanTrainingText(text, 300)}]` });
+  }
+  const seen = new Set();
+  return commands.filter(command => {
+    const key = `${command.kind}:${command.value}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 3);
+}
+
 async function serverChat(prompt, options = {}, clientId = "local") {
   const length = Math.max(80, Math.min(1800, Number(options.length || 420)));
   const safePrompt = cleanTrainingText(prompt, 1200) || "Hello";
@@ -579,6 +677,18 @@ async function serverChat(prompt, options = {}, clientId = "local") {
   let context = `${cleanTrainingText(serverLab.persistentContext, 1800)}\n${recalled ? `[RECALLED_MEMORY]\n${recalled}\n[/RECALLED_MEMORY]\n` : ""}${primer}`;
   let output = "";
   const toolSteps = [];
+
+  const inferredCommands = inferContextCommands(safePrompt);
+  if (inferredCommands.length) {
+    broadcastEvent("thinking", { clientId, phase: "searching", commands: inferredCommands });
+    const inferredResults = await executeToolCommandsFromText(inferredCommands.map(command => command.raw).join("\n"), clientId);
+    toolSteps.push(...inferredResults);
+    const inferredContext = toolContext(inferredResults);
+    context += `\n${inferredContext}\nUse this context before answering:\n`;
+    serverLab.remember(inferredContext);
+    serverLab.addCorpus(`context-tool-${Date.now()}`, inferredContext, Math.min(10, serverLab.curriculumLevel + 1));
+    serverLab.best().adaptDialogue(`${CONTROL_HUMAN} Use retrieved context. ${CONTROL_ASSISTANT} ${inferredContext} ${CONTROL_TURN_END}`, 0.012, 1100);
+  }
 
   broadcastEvent("thinking", { clientId, phase: "generating" });
   for (let round = 0; round <= maxToolRounds; round++) {
@@ -619,7 +729,7 @@ async function serverChat(prompt, options = {}, clientId = "local") {
 
 async function rewardToolUseProbe() {
   if (serverEvolution.cycles % 30 !== 0) return;
-  const probe = "When current factual information is useful, emit one command like [WIKI:Artificial intelligence] or [SEARCH:evolutionary neural networks].";
+  const probe = "When current factual information, a web page, or a video transcript is useful, emit one command like [WIKI:Artificial intelligence], [SEARCH:evolutionary neural networks], [FETCH:https://example.com], or [YOUTUBE:https://youtu.be/example].";
   const generated = serverLab.best().generate(probe, 180, 0.85);
   const commands = findCommandTokens(generated);
   if (!commands.length) return;
@@ -800,6 +910,7 @@ function saveServerModel(force = false) {
 
 function serverSnapshot() {
   const best = serverLab.best();
+  const speciesCount = Math.max(1, serverLab.species.length || (best ? 1 : 0));
   return {
     running: serverEvolution.running,
     startedAt: serverEvolution.startedAt,
@@ -818,7 +929,8 @@ function serverSnapshot() {
     imageTargets: serverImageTargets.length,
     corpora: serverLab.corpora.length,
     curriculumLevel: serverLab.curriculumLevel,
-    species: serverLab.species.length,
+    species: speciesCount,
+    bestSpecies: best.speciesId && best.speciesId !== "unassigned" ? best.speciesId : "s1",
     population: serverLab.population.length,
     populationTarget: serverLab.config.populationSize,
     maxNeurons: global.GenesisEngine.MAX_NEURONS,
@@ -1191,6 +1303,18 @@ const server = http.createServer(async (req, res) => {
         saveServerModel(false);
       }
       sendJson(res, { ok: true, tools, injectedContext, serverEvolution: serverSnapshot() });
+      return;
+    }
+
+    if (url.pathname === "/api/tools/youtube-transcript" && req.method === "GET") {
+      const clientId = req.socket.remoteAddress || "local";
+      const rawUrl = url.searchParams.get("url") || "";
+      const result = await executeToolCommand({ kind: "YOUTUBE", value: rawUrl, raw: `[YOUTUBE:${rawUrl}]` }, clientId);
+      const injectedContext = toolContext([result]);
+      serverLab.remember(injectedContext);
+      serverLab.addCorpus(`youtube-${Date.now()}`, injectedContext, Math.min(10, serverLab.curriculumLevel + 1));
+      saveServerModel(false);
+      sendJson(res, { ok: true, result, injectedContext, serverEvolution: serverSnapshot() });
       return;
     }
 
