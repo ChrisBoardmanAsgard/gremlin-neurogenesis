@@ -70,6 +70,8 @@ let serverEvolution = {
   cycles: 0,
   dreams: 0,
   lastDream: null,
+  reflections: 0,
+  lastReflection: null,
   error: null
 };
 
@@ -576,6 +578,22 @@ function selfTuneFromInspiration(topic) {
   };
 }
 
+function rewardEffectiveToolUse(result, commandKind = "TOOL") {
+  const best = serverLab.best();
+  if (!best || result?.error) return 0;
+  const usefulChars = Math.max(0, String(result?.text || "").length);
+  if (usefulChars < 120 && commandKind !== "SELF_TUNE") return 0;
+  const usefulSignal = Math.min(1, usefulChars / 6000);
+  const kindBoost = commandKind === "SELF_TUNE" ? 0.7 : commandKind === "YOUTUBE" || commandKind === "TRANSCRIPT" ? 1.08 : 1;
+  const reward = Math.min(0.04, usefulSignal * kindBoost * 0.024);
+  best.toolUseScore = Math.min(1, (best.toolUseScore || best.metadata?.toolUseScore || 0) * 0.965 + usefulSignal * kindBoost * 0.055);
+  best.metadata = { ...(best.metadata || {}), toolUseScore: best.toolUseScore };
+  best.selfTuningGain = Math.min(0.5, (best.selfTuningGain || 0) + reward * 0.42);
+  best.memorySensitivity = Math.min(2.5, (best.memorySensitivity || 1) + reward * 0.3);
+  best.fitness = Math.max(best.fitness || 0, (best.fitness || 0) + reward);
+  return reward;
+}
+
 async function executeToolCommand(command, clientId = "local") {
   assertToolRateLimit(clientId);
   const value = command.value.trim();
@@ -595,6 +613,7 @@ async function executeToolCommand(command, clientId = "local") {
     chars: result.text.length,
     ok: true
   });
+  rewardEffectiveToolUse(result, command.kind);
   return {
     ...command,
     ...result
@@ -736,9 +755,92 @@ async function rewardToolUseProbe() {
   const results = await executeToolCommandsFromText(generated, "evolution-probe");
   const usefulChars = results.reduce((sum, result) => sum + (result.error ? 0 : result.text.length), 0);
   if (usefulChars > 300) {
-    serverLab.best().fitness += Math.min(0.08, usefulChars / 100000);
+    rewardEffectiveToolUse({ text: results.map(result => result.text || "").join("\n") }, "SEARCH");
     serverLab.remember(toolContext(results));
   }
+}
+
+function recentFitnessDips(history = [], limit = 5) {
+  const points = history
+    .filter(point => point && Number.isFinite(point.fitness))
+    .slice(-160);
+  if (points.length < 6) return [];
+  let rollingBest = points[0].fitness || 0;
+  const dips = [];
+  for (let i = 1; i < points.length; i++) {
+    const previous = points[i - 1].fitness || 0;
+    const current = points[i].fitness || 0;
+    rollingBest = Math.max(rollingBest, previous);
+    const dropFromPrevious = previous > 0 ? (previous - current) / previous : 0;
+    const dropFromBest = rollingBest > 0 ? (rollingBest - current) / rollingBest : 0;
+    if (dropFromPrevious > 0.055 || dropFromBest > 0.12) {
+      dips.push({
+        generation: points[i].generation || serverLab.generation,
+        fitness: current,
+        previous,
+        best: rollingBest,
+        loss: points[i].loss,
+        neurons: points[i].neurons,
+        synapses: points[i].synapses,
+        severity: Math.max(dropFromPrevious, dropFromBest)
+      });
+    }
+  }
+  return dips.sort((a, b) => b.severity - a.severity).slice(0, limit);
+}
+
+async function runServerDeepReflection(reason = "manual-pause") {
+  const dips = recentFitnessDips(serverLab.history, 5);
+  const best = serverLab.best();
+  const beforeLoss = Number.isFinite(best.loss) ? best.loss : 0;
+  const beforeFitness = Number.isFinite(best.fitness) ? best.fitness : 0;
+  const dipText = dips.length
+    ? dips.map(dip => `gen ${dip.generation}: fitness ${Number(dip.fitness || 0).toFixed(4)}, loss ${Number(dip.loss || 0).toFixed(3)}, ${dip.neurons || "?"}n/${dip.synapses || "?"}s`).join("; ")
+    : "No sharp recent fitness dips found; reinforce coherent dialogue, memory recall, and controlled tool use.";
+  const reflection = [
+    `${CONTROL_HUMAN} Deep reflection after ${reason}. Recent fitness dips: ${dipText}.`,
+    `${CONTROL_ASSISTANT} I should preserve useful scale, retrieve facts with tools only when needed, answer in complete natural dialogue, and strengthen memory links before resuming training. ${CONTROL_TURN_END}`
+  ].join(" ");
+  serverLab.remember(reflection);
+  serverLab.addCorpus(`deep-reflection-${Date.now()}`, reflection, Math.min(10, serverLab.curriculumLevel + 1));
+
+  const toolPrompt = [
+    `[SELF_TUNE:Deep reflection: recover from fitness dips, improve memory recall, reward healthy scaling and tool-use discipline.]`,
+    `[SEARCH:sparse neuroevolution recurrent memory coherent dialogue fitness shaping]`
+  ].join("\n");
+  const tools = await executeToolCommandsFromText(toolPrompt, "deep-reflection");
+  const injectedContext = toolContext(tools);
+  if (injectedContext) {
+    serverLab.remember(injectedContext);
+    serverLab.addCorpus(`deep-reflection-tools-${Date.now()}`, injectedContext, Math.min(10, serverLab.curriculumLevel + 1));
+  }
+  const replay = serverLab.dreamReplay({
+    count: 10,
+    maxChars: serverLab.config.neurons > 1800 ? 1100 : 1500,
+    maxTokens: serverLab.config.neurons > 1800 ? 420 : 560,
+    gradientSteps: Math.max(1, serverLab.config.gradientSteps || 2),
+    gradientLearningRate: Math.min(0.032, (serverLab.config.gradientLearningRate || 0.016) * 1.35),
+    plasticityBoost: 2.8,
+    weakTurnRepeats: 4,
+    protectScale: true,
+    incrementDreamCount: false
+  });
+  best.evaluateCoherence(`${reflection}\n${injectedContext}`, "Answer naturally, recall memory, and only use tools when useful.");
+  serverLab.shapeFitness(best, { protectScale: true, trainingText: reflection });
+  serverEvolution.reflections += 1;
+  serverEvolution.lastReflection = {
+    at: new Date().toISOString(),
+    reason,
+    dips: dips.length,
+    lossDelta: beforeLoss - (best.loss || beforeLoss),
+    fitnessDelta: (best.fitness || beforeFitness) - beforeFitness,
+    toolResults: tools.filter(tool => !tool.error).length,
+    toolUseScore: best.toolUseScore || 0,
+    replayed: replay?.dreamed || 0
+  };
+  saveServerModel(true);
+  broadcastEvent("evolution", { generation: serverLab.generation, reflection: serverEvolution.lastReflection });
+  return serverEvolution.lastReflection;
 }
 
 function scoreSelfGeneratedPair(prompt, response) {
@@ -848,7 +950,7 @@ function applyServerModelData(data = {}, source = "model") {
     }
   }
   if (typeof data.persistentContext === "string") serverLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
-  if (Array.isArray(data.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 180);
+  if (Array.isArray(data.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
   if (Array.isArray(data.corpora)) serverLab.rebuildCurriculumCorpus();
   if (data.curriculumLevel) serverLab.curriculumLevel = data.curriculumLevel;
   if (data.config) serverLab.setConfig(data.config);
@@ -886,7 +988,7 @@ function saveServerModel(force = false) {
   if (clean.quarantined) {
     serverLab.corpora = clean.corpora;
     serverLab.persistentContext = sanitizePersistentContext(serverLab.persistentContext, 16000);
-    serverLab.memoryBank = sanitizeMemoryBank(serverLab.memoryBank, 180);
+    serverLab.memoryBank = sanitizeMemoryBank(serverLab.memoryBank, 240);
     serverLab.rebuildCurriculumCorpus();
   }
   const best = serverLab.best();
@@ -896,7 +998,7 @@ function saveServerModel(force = false) {
     corpus: serverLab.corpus,
     corpora: serverLab.corpora,
     persistentContext: sanitizePersistentContext(serverLab.persistentContext, 16000),
-    memoryBank: sanitizeMemoryBank(serverLab.memoryBank, 180),
+    memoryBank: sanitizeMemoryBank(serverLab.memoryBank, 240),
     curriculumLevel: serverLab.curriculumLevel,
     imageTargets: serverImageTargets,
     config: serverLab.config,
@@ -917,6 +1019,8 @@ function serverSnapshot() {
     cycles: serverEvolution.cycles,
     dreams: serverEvolution.dreams,
     lastDream: serverEvolution.lastDream,
+    reflections: serverEvolution.reflections,
+    lastReflection: serverEvolution.lastReflection,
     delayMs: serverEvolution.delayMs,
     baseDelayMs: serverEvolution.baseDelayMs,
     throttle: serverEvolution.throttle,
@@ -942,6 +1046,9 @@ function serverSnapshot() {
     loss: best.loss,
     coherence: best.coherenceScore || 0,
     dialogue: best.dialogueScore || 0,
+    toolUseScore: best.toolUseScore || best.metadata?.toolUseScore || 0,
+    growthBonus: best.growthBonus || 0,
+    healthyScaleBonus: best.healthyScaleBonus || 0,
     updatedAt: new Date().toISOString()
   };
 }
@@ -967,7 +1074,7 @@ function applyServerPayload(payload = {}) {
   }).filter(target => target.pixels.length >= target.size * target.size * 4);
   if (Array.isArray(payload.corpora)) serverLab.corpora = payload.corpora;
   if (typeof payload.persistentContext === "string") serverLab.persistentContext = payload.persistentContext;
-  if (Array.isArray(payload.memoryBank)) serverLab.memoryBank = payload.memoryBank.slice(-180);
+  if (Array.isArray(payload.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(payload.memoryBank, 240);
   if (payload.curriculumLevel) serverLab.curriculumLevel = payload.curriculumLevel;
   if (typeof payload.corpus === "string" && payload.corpus.trim()) serverLab.setCorpus(payload.corpus);
   if (payload.champion && !blocksDowngrade) serverLab.importChampion(payload.champion);
@@ -999,7 +1106,7 @@ async function serverEvolutionTick() {
   try {
     enforceServerRuntimeLimits();
     const dialogueText = `${CHAT_PRIMER_TEXT}\n${dialogueTrainingText(`${serverLab.persistentContext}\n${serverLab.corpus}`, serverLab.config.neurons > 1800 ? 900 : 1400)}`;
-    serverLab.evolveOnce({
+    const evolutionResult = serverLab.evolveOnce({
       trainingText: dialogueText,
       dialogueMode: true,
       dialogueMaxChars: serverLab.config.neurons > 1800 ? 900 : 1400,
@@ -1026,6 +1133,9 @@ async function serverEvolutionTick() {
       dialogue: serverLab.best().dialogueScore || 0,
       neurons: serverLab.best().neurons,
       synapses: serverLab.best().synapses,
+      topologyMode: evolutionResult.topologyMode,
+      targetNeurons: evolutionResult.topologyTargets?.neurons,
+      targetSynapses: evolutionResult.topologyTargets?.synapses,
       throttle: serverEvolution.throttle
     });
     if (serverEvolution.cycles % 12 === 0) saveServerModel(false);
@@ -1214,6 +1324,13 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/server/stop" && req.method === "POST") {
       stopServerEvolution();
       sendJson(res, { ok: true, serverEvolution: serverSnapshot() });
+      return;
+    }
+
+    if (url.pathname === "/api/server/deep-reflect" && req.method === "POST") {
+      const payload = await readBody(req);
+      const reflection = await runServerDeepReflection(String(payload.reason || "manual-pause"));
+      sendJson(res, { ok: true, reflection, serverEvolution: serverSnapshot() });
       return;
     }
 

@@ -183,7 +183,7 @@
     return kept.join("\n").slice(-maxLength);
   }
 
-  function sanitizeMemoryBank(memoryBank, limit = 180) {
+  function sanitizeMemoryBank(memoryBank, limit = 240) {
     if (!Array.isArray(memoryBank)) return [];
     return memoryBank
       .filter(item => item && isUsefulTrainingText(item.text || "", { minQuality: 0.36, minEntropy: 0.34, minDialogue: 0.22, minLength: 12 }))
@@ -573,8 +573,11 @@
       this.coherenceScore = options.coherenceScore || 0;
       this.dialogueScore = options.dialogueScore || 0;
       this.growthGain = options.growthGain || 0;
+      this.toolUseScore = options.toolUseScore || options.metadata?.toolUseScore || 0;
       this.embeddingMutationGain = options.embeddingMutationGain || 0;
       this.metadata = { ...(options.metadata || {}) };
+      this.metadata.toolUseScore = clamp(Number(this.metadata.toolUseScore ?? this.toolUseScore ?? 0), 0, 1);
+      this.toolUseScore = this.metadata.toolUseScore;
       this.metadata.dreamCount = Math.max(0, Math.floor(Number(this.metadata.dreamCount ?? options.dreamCount ?? 0)));
       this.dreamCount = this.metadata.dreamCount;
       this.previousFitness = options.previousFitness || 0;
@@ -654,8 +657,9 @@
         coherenceScore: this.coherenceScore,
         dialogueScore: this.dialogueScore,
         growthGain: this.growthGain,
+        toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -711,8 +715,9 @@
         coherenceScore: this.coherenceScore,
         dialogueScore: this.dialogueScore,
         growthGain: this.growthGain,
+        toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -990,6 +995,35 @@
       return 1;
     }
 
+    nudgeTopology(targetNeurons = this.neurons, targetSynapses = this.synapses, intensity = 1) {
+      const beforeNeurons = this.neurons;
+      const beforeSynapses = this.synapses;
+      const neuronGap = Math.round(targetNeurons - this.neurons);
+      const synapseGap = Math.round(targetSynapses - this.synapses);
+      const neuronSteps = Math.min(4, Math.max(1, Math.ceil(Math.abs(neuronGap) / Math.max(24, this.neurons * 0.018))));
+      const synapseSteps = Math.min(10, Math.max(1, Math.ceil(Math.abs(synapseGap) / Math.max(64, this.synapses * 0.018))));
+      if (neuronGap > Math.max(2, this.neurons * 0.003) && this.neurons < MAX_NEURONS) {
+        for (let i = 0; i < neuronSteps && this.neurons < MAX_NEURONS; i++) this.splitSynapse();
+      } else if (neuronGap < -Math.max(2, this.neurons * 0.003) && this.neurons > 64) {
+        const delta = Math.max(1, Math.min(neuronSteps, this.neurons - 64));
+        this.resize(this.neurons - delta, this.synapses);
+      }
+      if (synapseGap > Math.max(6, this.synapses * 0.004) && this.synapses < MAX_SYNAPSES) {
+        for (let i = 0; i < synapseSteps && this.synapses < MAX_SYNAPSES; i++) this.addSynapse();
+      } else if (synapseGap < -Math.max(6, this.synapses * 0.004) && this.synapses > 128) {
+        for (let i = 0; i < synapseSteps && this.synapses > 128; i++) this.pruneSynapse();
+      }
+      const neuronGrowth = Math.max(0, this.neurons - beforeNeurons) / Math.max(1, targetNeurons);
+      const synapseGrowth = Math.max(0, this.synapses - beforeSynapses) / Math.max(1, targetSynapses);
+      const movement = Math.abs(this.neurons - beforeNeurons) + Math.abs(this.synapses - beforeSynapses) / 10;
+      if (movement > 0) {
+        this.previousNeurons = beforeNeurons;
+        this.previousSynapses = beforeSynapses;
+        this.growthGain = clamp((this.growthGain || 0) * 0.94 + Math.min(0.12, (neuronGrowth * 1.25 + synapseGrowth * 0.65) * intensity), 0, 0.12);
+      }
+      return { neurons: this.neurons - beforeNeurons, synapses: this.synapses - beforeSynapses };
+    }
+
     mutate(rate = 0.035, config = {}) {
       const mutation = clamp(rate, 0.001, 0.25);
       const scalarMutation = clamp(config.scalarMutation ?? 0.028, 0.001, 0.08);
@@ -1000,7 +1034,12 @@
       this.previousFitness = Number.isFinite(this.baseFitness) && this.baseFitness > 0 ? this.baseFitness : (this.fitness || 0);
       this.previousNeurons = beforeNeurons;
       this.previousSynapses = beforeSynapses;
-      const structural = Math.random() < 0.24;
+      const topologyPressure = Math.min(
+        0.28,
+        Math.abs(targetNeurons - this.neurons) / Math.max(1, this.neurons) * 0.9
+        + Math.abs(targetSynapses - this.synapses) / Math.max(1, this.synapses) * 0.45
+      );
+      const structural = Math.random() < clamp(0.24 + topologyPressure, 0.18, 0.52);
       if (structural) {
         const neuronSign = Math.sign(targetNeurons - this.neurons);
         const synapseSign = Math.sign(targetSynapses - this.synapses);
@@ -1016,6 +1055,9 @@
           const synapseDelta = Math.round(randomWeight(Math.max(8, this.synapses * 0.012))) + synapseSign * 12;
           this.resize(this.neurons + neuronDelta, this.synapses + synapseDelta);
         }
+      }
+      if (!structural && topologyPressure > 0.018 && Math.random() < 0.1 + topologyPressure) {
+        this.nudgeTopology(targetNeurons, targetSynapses, 0.45);
       }
 
       for (let i = 0; i < this.weights.length; i++) {
@@ -1772,6 +1814,8 @@
       child.plasticityRate = Math.random() < 0.5 ? fitter.plasticityRate : (fitter.plasticityRate + other.plasticityRate) * 0.5;
       child.recurrentBridgeRate = Math.random() < 0.5 ? fitter.recurrentBridgeRate : (fitter.recurrentBridgeRate + other.recurrentBridgeRate) * 0.5;
       child.memorySensitivity = Math.random() < 0.5 ? fitter.memorySensitivity : (fitter.memorySensitivity + other.memorySensitivity) * 0.5;
+      child.toolUseScore = clamp(((fitter.toolUseScore || 0) * 0.7) + ((other.toolUseScore || 0) * 0.3), 0, 1);
+      child.metadata = { ...(child.metadata || {}), toolUseScore: child.toolUseScore };
       for (let i = 0; i < child.neuronTypes.length; i++) {
         if (i < other.neuronTypes.length && Math.random() < 0.32) child.neuronTypes[i] = other.neuronTypes[i];
       }
@@ -1797,7 +1841,7 @@
         ? config.corpora
         : [{ name: "seed", text: this.corpus, difficulty: 1, enabled: true }];
       this.persistentContext = config.persistentContext || "";
-      this.memoryBank = Array.isArray(config.memoryBank) ? config.memoryBank.slice(-180) : [];
+      this.memoryBank = Array.isArray(config.memoryBank) ? config.memoryBank.slice(-240) : [];
       this.curriculumLevel = config.curriculumLevel || 1;
       this.species = [];
       this.imageTrainingCursor = 0;
@@ -1961,8 +2005,16 @@
       const previousFitness = Number.isFinite(genome.previousFitness) ? genome.previousFitness : 0;
       const grew = genome.neurons > (genome.previousNeurons || genome.neurons) || genome.synapses > (genome.previousSynapses || genome.synapses);
       const stableOrImproved = !previousFitness || shapedBase >= previousFitness * 0.96;
-      const growthBonus = grew && stableOrImproved ? Math.min(0.09, Math.max(0, genome.growthGain || 0) * 0.75) : 0;
+      const growthBonus = grew && stableOrImproved ? Math.min(0.12, Math.max(0, genome.growthGain || 0) * 0.9) : 0;
+      const healthyScaleBonus = hasUsableLoss && stableOrImproved
+        ? Math.min(0.055, Math.log2(1 + Math.min(neuronRatio, 1.2)) * 0.034 + Math.log2(1 + Math.min(synapseRatio, 1.28)) * 0.024)
+        : 0;
+      const toolUseBonus = Math.min(0.08, Math.max(0, genome.toolUseScore || genome.metadata?.toolUseScore || 0) * 0.08);
+      const memoryStabilityBonus = Math.min(0.045, Math.max(0, genome.memorySensitivity || 0) * Math.max(0, genome.coherenceScore || 0) * 0.018);
       genome.growthBonus = growthBonus;
+      genome.healthyScaleBonus = healthyScaleBonus;
+      genome.toolUseBonus = toolUseBonus;
+      genome.memoryStabilityBonus = memoryStabilityBonus;
       const coherenceBonus = Math.min(0.11, Math.max(0, genome.coherenceScore || 0) * 0.11);
       const dialogueBonus = Math.min(0.14, Math.max(0, genome.dialogueScore || 0) * 0.14);
       genome.coherenceBonus = coherenceBonus;
@@ -1970,13 +2022,58 @@
 
       const scaleFloor = options.protectScale === false ? 0.18 : 0.72;
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
-      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + coherenceBonus + dialogueBonus);
+      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus);
       if (genome.origin === "immigrant" && neuronRatio < 0.55) genome.fitness *= 0.62;
       return genome.fitness;
     }
 
+    adaptiveTopologyTargets(options = {}) {
+      const best = this.best() || { neurons: this.config.neurons, synapses: this.config.synapses, fitness: 0, loss: 999 };
+      const recent = this.history.slice(-28).filter(point => Number.isFinite(point.fitness));
+      const first = recent[0] || null;
+      const last = recent[recent.length - 1] || null;
+      const bestRecentFitness = recent.reduce((max, point) => Math.max(max, point.fitness || 0), 0);
+      const fitnessGain = first && last && first.fitness > 0 ? (last.fitness - first.fitness) / first.fitness : 0;
+      const lossGain = first && last && Number.isFinite(first.loss) && Number.isFinite(last.loss) ? first.loss - last.loss : 0;
+      const dip = last && bestRecentFitness > 0 ? (bestRecentFitness - last.fitness) / bestRecentFitness : 0;
+      const plateau = recent.length >= 14 && Math.abs(fitnessGain) < 0.018 && Math.abs(lossGain) < 0.08;
+      const healthy = (best.fitness || 0) > 0.08 && Number.isFinite(best.loss) && best.loss < 20;
+      const wave = Math.sin((this.generation + 1) / 9);
+      let neuronScale = 1;
+      if (healthy && fitnessGain >= -0.01) neuronScale += 0.018;
+      if (fitnessGain > 0.025 || lossGain > 0.12) neuronScale += 0.026;
+      if (plateau) neuronScale += wave >= 0 ? 0.038 : -0.032;
+      if (dip > 0.08 || lossGain < -0.16) neuronScale -= 0.045;
+      const heartbeat = plateau || Math.abs(neuronScale - 1) < 0.006
+        ? (wave >= 0 ? 1 : -1) * Math.max(1, Math.round(best.neurons * 0.006))
+        : 0;
+      const configFloor = Math.max(64, Math.floor((options.minTopologyNeurons || this.config.neurons || best.neurons) * 0.62));
+      const configCeiling = Math.min(MAX_NEURONS, Math.max(configFloor, Math.floor((options.maxTopologyNeurons || Math.max(this.config.neurons, best.neurons)) * 1.45)));
+      const targetNeurons = clamp(Math.round(best.neurons * neuronScale + heartbeat), configFloor, configCeiling);
+      const currentDensity = best.synapses / Math.max(1, best.neurons);
+      let density = clamp(currentDensity, 2.1, 9.5);
+      if (targetNeurons > best.neurons) density += 0.16;
+      if (targetNeurons < best.neurons) density -= 0.12;
+      if (plateau && wave < 0) density -= 0.08;
+      if (healthy && (best.dialogueScore || 0) > 0.35) density += 0.06;
+      density = clamp(density, 2.0, 10.5);
+      const synapseHeartbeat = plateau ? (wave >= 0 ? 1 : -1) * Math.max(8, Math.round(best.synapses * 0.008)) : 0;
+      const targetSynapses = clamp(Math.round(targetNeurons * density + synapseHeartbeat), 128, MAX_SYNAPSES);
+      return {
+        neurons: targetNeurons,
+        synapses: targetSynapses,
+        mode: dip > 0.08 ? "repair-prune" : plateau ? "explore-oscillate" : fitnessGain > 0.025 ? "healthy-grow" : "steady-drift"
+      };
+    }
+
     evolveOnce(options = {}) {
       const start = performance.now();
+      const topologyTargets = this.adaptiveTopologyTargets(options);
+      const fitnessOptions = {
+        ...options,
+        targetNeurons: options.targetNeurons || topologyTargets.neurons,
+        targetSynapses: options.targetSynapses || topologyTargets.synapses
+      };
       const trainingText = options.trainingText || this.trainingSlice(options.maxChars || 760);
       const imageTargets = Array.isArray(options.imageTargets) ? options.imageTargets.filter(Boolean) : [];
       const imageTarget = options.imageTarget || (imageTargets.length ? imageTargets[this.imageTrainingCursor % imageTargets.length] : null);
@@ -1988,7 +2085,7 @@
         if (imageTarget) {
           this.lastImageLoss = genome.trainImage(imageTarget, options.imagePrompt || imageTarget.name || "", options.imageLearningRate || 0.012);
         }
-        this.shapeFitness(genome, options);
+        this.shapeFitness(genome, fitnessOptions);
       }
       this.population.sort((a, b) => b.fitness - a.fitness);
       if (dialogueMode && options.dialogueProbe !== false) {
@@ -1996,11 +2093,11 @@
         const probeReference = trainingText.slice(0, options.dialogueProbeReferenceChars || 1600);
         for (let i = 0; i < probeCount; i++) {
           this.population[i].evaluateCoherence(probeReference, "Answer naturally and usefully in one or two sentences.");
-          this.shapeFitness(this.population[i], options);
+          this.shapeFitness(this.population[i], fitnessOptions);
         }
         this.population.sort((a, b) => b.fitness - a.fitness);
       }
-      const protectedFloor = options.protectScale === false ? 64 : Math.max(64, Math.floor((options.targetNeurons || this.config.neurons) * 0.72));
+      const protectedFloor = options.protectScale === false ? 64 : Math.max(64, Math.floor((fitnessOptions.targetNeurons || this.config.neurons) * 0.72));
       const protectedChampion = this.population.find(genome => genome.neurons >= protectedFloor) || this.population[0];
       if (protectedChampion !== this.population[0]) {
         this.population = [protectedChampion, ...this.population.filter(genome => genome !== protectedChampion)];
@@ -2034,7 +2131,11 @@
       if (options.coherenceEval !== false) {
         champion.evaluateCoherence(trainingText, dialogueMode ? "Respond with a clear useful memory from training." : "Summarize the training text clearly.");
       }
-      this.shapeFitness(champion, options);
+      const nudgeEvery = options.topologyNudgeEvery ?? 2;
+      if (options.topologyNudge !== false && nudgeEvery > 0 && this.generation % nudgeEvery === 0) {
+        champion.nudgeTopology(fitnessOptions.targetNeurons, fitnessOptions.targetSynapses, 0.75);
+      }
+      this.shapeFitness(champion, fitnessOptions);
 
       const targetPopulationSize = this.population.length < this.config.populationSize
         ? Math.min(this.config.populationSize, this.population.length + (options.populationSpawn || 2))
@@ -2058,8 +2159,8 @@
           parent.origin = "evolved";
           parent.generation = this.generation + 1;
           parent.mutate(mutationRate, {
-            targetNeurons: this.config.neurons,
-            targetSynapses: this.config.synapses,
+            targetNeurons: fitnessOptions.targetNeurons,
+            targetSynapses: fitnessOptions.targetSynapses,
             scalarMutation: options.scalarMutation ?? this.config.scalarMutation
           });
           next.push(parent);
@@ -2073,8 +2174,8 @@
         parent.origin = "evolved";
         parent.generation = this.generation + 1;
         parent.mutate(mutationRate, {
-          targetNeurons: this.config.neurons,
-          targetSynapses: this.config.synapses,
+          targetNeurons: fitnessOptions.targetNeurons,
+          targetSynapses: fitnessOptions.targetSynapses,
           scalarMutation: options.scalarMutation ?? this.config.scalarMutation
         });
         next.push(parent);
@@ -2084,9 +2185,22 @@
       this.population[0].generation = this.generation;
       const elapsed = Math.round(performance.now() - start);
       const best = this.population[0];
-      this.history.push({ generation: this.generation, fitness: best.fitness, loss: best.loss, imageLoss: this.lastImageLoss, elapsed, species: species.length, curriculumLevel: this.curriculumLevel });
+      this.history.push({
+        generation: this.generation,
+        fitness: best.fitness,
+        loss: best.loss,
+        imageLoss: this.lastImageLoss,
+        elapsed,
+        species: species.length,
+        curriculumLevel: this.curriculumLevel,
+        neurons: best.neurons,
+        synapses: best.synapses,
+        targetNeurons: fitnessOptions.targetNeurons,
+        targetSynapses: fitnessOptions.targetSynapses,
+        topologyMode: topologyTargets.mode
+      });
       if (this.history.length > 160) this.history.shift();
-      return { best, elapsed, species, imageTarget, imageLoss: this.lastImageLoss };
+      return { best, elapsed, species, imageTarget, imageLoss: this.lastImageLoss, topologyTargets, topologyMode: topologyTargets.mode };
     }
 
     importChampion(data, options = {}) {
@@ -2135,7 +2249,7 @@
           keywords,
           strength: 1
         });
-        this.memoryBank = sanitizeMemoryBank(this.memoryBank, 180);
+        this.memoryBank = sanitizeMemoryBank(this.memoryBank, 240);
       }
     }
 

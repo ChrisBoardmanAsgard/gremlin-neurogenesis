@@ -22,6 +22,7 @@
     cachedActivity: null,
     dreaming: false,
     deepDreaming: false,
+    reflecting: false,
     statusTimer: 0
   };
   const MAX_IMPORTED_TEXT_CHARS = 1_200_000;
@@ -78,14 +79,14 @@
     if (el("evolveButton")) el("evolveButton").textContent = state.evolving ? "Stop" : "Evolve";
     if (el("pauseButton")) el("pauseButton").textContent = state.evolving ? "Pause" : "Paused";
     if (el("dreamButton")) {
-      el("dreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming;
+      el("dreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming || state.reflecting;
       el("dreamButton").textContent = state.dreaming ? "Dreaming" : "Dream";
     }
     if (el("deepDreamButton")) {
-      el("deepDreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming;
+      el("deepDreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming || state.reflecting;
       el("deepDreamButton").textContent = state.deepDreaming ? "DEEP Dreaming" : "DEEP Dream";
     }
-    if (el("deepDreamLastButton")) el("deepDreamLastButton").disabled = state.evolving || state.dreaming || state.deepDreaming;
+    if (el("deepDreamLastButton")) el("deepDreamLastButton").disabled = state.evolving || state.dreaming || state.deepDreaming || state.reflecting;
   }
 
   function readyToTrain() {
@@ -507,7 +508,8 @@
     const maxSynapses = Math.max(...state.lab.population.map(genome => genome.synapses));
     const minSynapses = Math.min(...state.lab.population.map(genome => genome.synapses));
     const imageNote = result.imageTarget ? `, image "${result.imageTarget.name}" loss ${Number(result.imageLoss).toFixed(4)}` : "";
-    log(`Generation ${state.lab.generation}: fitness ${result.best.fitness.toFixed(4)}, loss ${result.best.loss.toFixed(3)}, best ${result.best.neurons}n/${result.best.synapses}s, population ${minNeurons}-${maxNeurons}n and ${minSynapses}-${maxSynapses}s${imageNote}.`);
+    const topologyNote = result.topologyTargets ? `, topology ${result.topologyMode} -> ${result.topologyTargets.neurons}n/${result.topologyTargets.synapses}s` : "";
+    log(`Generation ${state.lab.generation}: fitness ${result.best.fitness.toFixed(4)}, loss ${result.best.loss.toFixed(3)}, best ${result.best.neurons}n/${result.best.synapses}s, population ${minNeurons}-${maxNeurons}n and ${minSynapses}-${maxSynapses}s${topologyNote}${imageNote}.`);
     updateReadout();
     return result;
   }
@@ -1200,6 +1202,106 @@
     updateReadout();
   }
 
+  function recentFitnessDips(limit = 5) {
+    const points = (state.lab.history || []).filter(point => point && Number.isFinite(point.fitness)).slice(-160);
+    if (points.length < 6) return [];
+    let rollingBest = points[0].fitness || 0;
+    const dips = [];
+    for (let i = 1; i < points.length; i++) {
+      const previous = points[i - 1].fitness || 0;
+      const current = points[i].fitness || 0;
+      rollingBest = Math.max(rollingBest, previous);
+      const dropFromPrevious = previous > 0 ? (previous - current) / previous : 0;
+      const dropFromBest = rollingBest > 0 ? (rollingBest - current) / rollingBest : 0;
+      if (dropFromPrevious > 0.055 || dropFromBest > 0.12) {
+        dips.push({
+          generation: points[i].generation || state.lab.generation,
+          fitness: current,
+          previous,
+          best: rollingBest,
+          loss: points[i].loss,
+          neurons: points[i].neurons,
+          synapses: points[i].synapses,
+          severity: Math.max(dropFromPrevious, dropFromBest)
+        });
+      }
+    }
+    return dips.sort((a, b) => b.severity - a.severity).slice(0, limit);
+  }
+
+  async function runDeepReflection(reason = "manual pause") {
+    if (state.evolving || state.dreaming || state.deepDreaming || state.reflecting) return;
+    state.reflecting = true;
+    syncTrainingControls();
+    setStatus("Deep reflection");
+    const best = state.lab.best();
+    const beforeLoss = Number.isFinite(best.loss) ? best.loss : 0;
+    const beforeFitness = Number.isFinite(best.fitness) ? best.fitness : 0;
+    const dips = recentFitnessDips(5);
+    log(`Deep reflection started: found ${dips.length} fitness dip(s).`);
+    try {
+      const dipText = dips.length
+        ? dips.map(dip => `gen ${dip.generation}: fitness ${Number(dip.fitness || 0).toFixed(4)}, loss ${Number(dip.loss || 0).toFixed(3)}, ${dip.neurons || "?"}n/${dip.synapses || "?"}s`).join("; ")
+        : "No sharp recent dip found; reinforce coherent dialogue, memory recall, and careful tool use.";
+      const reflectionPair = `${CONTROL_HUMAN} Deep reflection after ${reason}. Recent fitness dips: ${dipText}. ${CONTROL_ASSISTANT} I will protect useful neuronal scale, recall relevant memory, answer in natural complete sentences, and use tools only when outside context helps. ${CONTROL_TURN_END}`;
+      state.lab.remember(reflectionPair);
+      state.lab.addCorpus(`deep-reflection-${Date.now()}`, reflectionPair, Math.min(10, state.lab.curriculumLevel + 1));
+      if (state.serverChatAvailable) {
+        try {
+          const response = await fetch("/api/tools/execute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: [
+                "[SELF_TUNE:Deep reflection: recover from fitness dips, improve memory recall, coherent dialogue, healthy scale, and disciplined tool use.]",
+                "[SEARCH:sparse neuroevolution recurrent memory coherent dialogue fitness shaping]"
+              ].join("\n")
+            })
+          });
+          const payload = await response.json();
+          if (response.ok && payload.ok && payload.injectedContext) {
+            state.lab.remember(payload.injectedContext);
+            state.lab.addCorpus(`deep-reflection-tools-${Date.now()}`, payload.injectedContext, Math.min(10, state.lab.curriculumLevel + 1));
+            const usefulChars = payload.injectedContext.length;
+            best.toolUseScore = Math.min(1, (best.toolUseScore || best.metadata?.toolUseScore || 0) * 0.96 + Math.min(1, usefulChars / 6000) * 0.06);
+            best.metadata = { ...(best.metadata || {}), toolUseScore: best.toolUseScore };
+            log(`Deep reflection integrated tool context (${formatChars(usefulChars)}).`);
+          }
+          if (payload.serverEvolution) updateServerEvolutionStatus(payload.serverEvolution);
+        } catch (error) {
+          log(`Deep reflection tools skipped safely: ${error.message}`);
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+      const replay = state.lab.dreamReplay({
+        count: 9,
+        maxChars: Number(state.lab.config.neurons) > 1800 ? 1100 : 1500,
+        maxTokens: Number(state.lab.config.neurons) > 1800 ? 420 : 560,
+        gradientSteps: Math.max(1, state.lab.config.gradientSteps || 2),
+        gradientLearningRate: Math.min(0.032, (state.lab.config.gradientLearningRate || 0.016) * 1.35),
+        plasticityBoost: 2.75,
+        weakTurnRepeats: 4,
+        protectScale: true,
+        incrementDreamCount: false
+      });
+      best.evaluateCoherence(reflectionPair, "Answer naturally, recall memory, and use controlled tools only when useful.");
+      state.lab.shapeFitness(best, { protectScale: true, trainingText: reflectionPair });
+      saveBrowserCheckpoint("after-deep-reflection");
+      updateReadout();
+      invalidateActivityCache();
+      const lossImprovement = Math.max(0, beforeLoss - (best.loss || beforeLoss));
+      const fitnessDelta = (best.fitness || beforeFitness) - beforeFitness;
+      log(`Deep reflection complete. Replayed ${replay?.dreamed || 0} trace(s), loss improved by ${lossImprovement.toFixed(3)}, fitness delta ${fitnessDelta >= 0 ? "+" : ""}${fitnessDelta.toFixed(4)} - ready to train`);
+      setStatus("Ready to train");
+    } catch (error) {
+      log(`Deep reflection paused safely: ${error.message}`);
+      setStatus("Ready to train");
+    } finally {
+      state.reflecting = false;
+      syncTrainingControls();
+    }
+  }
+
   function exportModel() {
     const data = {
       format: "genesis-lab-genome-v1",
@@ -1207,7 +1309,7 @@
       corpus: state.lab.corpus,
       corpora: sanitizeCorpora(state.lab.corpora).corpora,
       persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
-      memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 180),
+      memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
         name: target.name,
@@ -1254,7 +1356,7 @@
       if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) during import.`);
     }
     if (typeof data.persistentContext === "string") nextLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
-    if (Array.isArray(data.memoryBank)) nextLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 180);
+    if (Array.isArray(data.memoryBank)) nextLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
     if (data.curriculumLevel) nextLab.curriculumLevel = data.curriculumLevel;
     nextLab.setConfig(data.config || {});
     if (Array.isArray(data.corpora)) nextLab.rebuildCurriculumCorpus();
@@ -1363,7 +1465,7 @@
       corpus: state.lab.corpus,
       corpora: sanitizeCorpora(state.lab.corpora).corpora,
       persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
-      memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 180),
+      memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
         name: target.name,
@@ -1393,6 +1495,20 @@
     const payload = await response.json();
     updateServerEvolutionStatus(payload.serverEvolution);
     log("Server autopilot stopped and saved.");
+    try {
+      const reflectResponse = await fetch("/api/server/deep-reflect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "server stop" })
+      });
+      const reflectPayload = await reflectResponse.json();
+      if (reflectResponse.ok && reflectPayload.ok) {
+        updateServerEvolutionStatus(reflectPayload.serverEvolution);
+        log(`Server deep reflection complete: ${reflectPayload.reflection?.dips || 0} dip(s), ${reflectPayload.reflection?.replayed || 0} trace(s) replayed - ready to train.`);
+      }
+    } catch (error) {
+      log(`Server deep reflection skipped safely: ${error.message}`);
+    }
     setStatus("Server paused");
   }
 
@@ -1431,7 +1547,7 @@
       if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) from the server pull.`);
     }
     if (typeof payload.model.persistentContext === "string") state.lab.persistentContext = sanitizePersistentContext(payload.model.persistentContext, 16000);
-    if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.model.memoryBank, 180);
+    if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.model.memoryBank, 240);
     if (payload.model.curriculumLevel) state.lab.curriculumLevel = payload.model.curriculumLevel;
     if (Array.isArray(payload.model.corpora)) state.lab.rebuildCurriculumCorpus();
     state.lab.setConfig(payload.model.config || {});
@@ -1518,12 +1634,16 @@
       state.evolving = !state.evolving;
       syncTrainingControls();
       if (state.evolving) evolveLoop();
-      else readyToTrain();
+      else {
+        readyToTrain();
+        runDeepReflection("evolution stopped").catch(error => log(`Deep reflection failed: ${error.message}`));
+      }
     });
 
     el("pauseButton").addEventListener("click", () => {
       state.evolving = false;
       readyToTrain();
+      runDeepReflection("manual pause").catch(error => log(`Deep reflection failed: ${error.message}`));
     });
 
     el("dreamButton").addEventListener("click", runManualDreamPhase);
