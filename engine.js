@@ -31,6 +31,7 @@
   const DEFAULT_VOCAB_SIZE = 768;
   const MAX_VOCAB_SIZE = 4096;
   const MEMORY_SIZE = 48;
+  const MEMORY_QUANT_LEVELS = 31;
   const PERSONALITY_SIZE = 16;
   const TOKEN_EMBEDDING_SIZE = 12;
   const IMAGE_LATENT_SIZE = 24;
@@ -54,6 +55,11 @@
       h = Math.imul(h, 16777619);
     }
     return h >>> 0;
+  }
+
+  function quantizeMemoryValue(value, levels = MEMORY_QUANT_LEVELS) {
+    const scale = Math.max(3, Math.floor(levels));
+    return clamp(Math.round(value * scale) / scale, -0.9, 0.9);
   }
 
   function keywordSet(text, limit = 32) {
@@ -817,11 +823,31 @@
 
     randomizeNeuronTypes() {
       for (let i = 0; i < this.neurons; i++) {
-        const r = Math.random();
-        this.neuronTypes[i] = r < 0.58 ? 0 : r < 0.78 ? 1 : r < 0.88 ? 2 : r < 0.94 ? 3 : r < 0.985 ? 4 : 5;
+        this.neuronTypes[i] = this.regionTypeForNeuron(i, this.neurons);
       }
-      for (let i = 0; i < Math.min(32, this.neurons); i++) this.neuronTypes[i] = 3;
-      for (let i = Math.max(0, this.neurons - 32); i < this.neurons; i++) this.neuronTypes[i] = i % 2 ? 4 : 5;
+      this.ensureBrainRegionBalance();
+    }
+
+    regionTypeForNeuron(index, total = this.neurons) {
+      const position = index / Math.max(1, total - 1);
+      const r = Math.random();
+      if (position < 0.12) return r < 0.72 ? 3 : r < 0.86 ? 1 : 0;
+      if (position < 0.26) return r < 0.54 ? 1 : r < 0.76 ? 2 : 0;
+      if (position < 0.58) return r < 0.66 ? 0 : r < 0.8 ? 1 : r < 0.93 ? 2 : 4;
+      if (position < 0.78) return r < 0.58 ? 4 : r < 0.74 ? 1 : r < 0.88 ? 2 : 0;
+      return r < 0.48 ? 5 : r < 0.66 ? 4 : r < 0.82 ? 1 : 0;
+    }
+
+    ensureBrainRegionBalance() {
+      const setBand = (startRatio, endRatio, type, step) => {
+        const start = Math.max(0, Math.floor(this.neurons * startRatio));
+        const end = Math.min(this.neurons, Math.max(start + 1, Math.floor(this.neurons * endRatio)));
+        for (let i = start; i < end; i += step) this.neuronTypes[i] = type;
+      };
+      setBand(0, 0.12, 3, 5);
+      setBand(0.12, 0.32, 1, 4);
+      setBand(0.52, 0.78, 4, 5);
+      setBand(0.78, 1, 5, 5);
     }
 
     randomizeImageHead() {
@@ -882,8 +908,7 @@
         const nextTypes = new Uint8Array(nextNeurons);
         nextTypes.set(this.neuronTypes.slice(0, Math.min(this.neuronTypes.length, nextNeurons)));
         for (let i = this.neuronTypes.length; i < nextNeurons; i++) {
-          const r = Math.random();
-          nextTypes[i] = r < 0.52 ? 0 : r < 0.72 ? 1 : r < 0.84 ? 2 : r < 0.92 ? 4 : 5;
+          nextTypes[i] = this.regionTypeForNeuron(i, nextNeurons);
         }
         this.imgWx = copy(this.imgWx, () => randomWeight(5));
         this.imgWy = copy(this.imgWy, () => randomWeight(5));
@@ -894,6 +919,7 @@
         this.imgB = copy(this.imgB, () => randomWeight(0.9));
         this.neuronTypes = nextTypes;
         this.neurons = nextNeurons;
+        this.ensureBrainRegionBalance();
         for (let i = 0; i < this.synapses; i++) {
           this.from[i] %= this.neurons;
           this.to[i] %= this.neurons;
@@ -1258,7 +1284,7 @@
           const write = Math.tanh(rawWrite * 0.92) * memoryWriteBrake;
           const keep = clamp(Math.tanh(rawKeep * 1.05) * memoryKeepBrake, 0.14, 0.82);
           const nextMemory = memory[m] * keep + candidate * write * (1 - keep * 0.55);
-          memory[m] = clamp(nextMemory * 0.992, -0.92, 0.92);
+          memory[m] = quantizeMemoryValue(nextMemory * 0.992);
           memoryMean += memory[m];
           if (Math.abs(memory[m]) > 0.72) memoryHot += 1;
           const inject = (Math.imul(m + 31, 1103515245) >>> 0) % this.neurons;
@@ -1267,7 +1293,7 @@
         if (memoryHot || Math.abs(memoryMean / Math.max(1, MEMORY_SIZE)) > 0.18) {
           const center = memoryMean / Math.max(1, MEMORY_SIZE);
           const damp = 1 - Math.min(0.18, memoryHot / Math.max(1, MEMORY_SIZE) * 0.9 + Math.abs(center) * 0.22);
-          for (let m = 0; m < MEMORY_SIZE; m++) memory[m] = clamp((memory[m] - center * 0.18) * damp, -0.9, 0.9);
+          for (let m = 0; m < MEMORY_SIZE; m++) memory[m] = quantizeMemoryValue((memory[m] - center * 0.18) * damp);
         }
       }
       for (let i = 0; i < this.neurons; i++) state[i] = Math.tanh(next[i]);
@@ -1941,6 +1967,8 @@
         ? config.corpora
         : [{ name: "seed", text: this.corpus, difficulty: 1, enabled: true }];
       this.persistentContext = config.persistentContext || "";
+      this.memorySummary = cleanTrainingText(config.memorySummary || "", 6000);
+      this.recentTranscript = Array.isArray(config.recentTranscript) ? config.recentTranscript.slice(-24) : [];
       this.memoryBank = Array.isArray(config.memoryBank) ? config.memoryBank.slice(-240) : [];
       this.curriculumLevel = config.curriculumLevel || 1;
       this.species = [];
@@ -2015,7 +2043,7 @@
     trainingSlice(maxChars = 760) {
       this.curriculumLevel = clamp(1 + Math.floor(this.generation / 250), 1, 10);
       this.rebuildCurriculumCorpus();
-      const source = `${this.persistentContext}\n${this.corpus}`;
+      const source = `${this.memorySummary}\n${this.persistentContext}\n${this.corpus}`;
       if (source.length <= maxChars) return source;
       const window = Math.max(maxChars, 120);
       const offset = (this.generation * 997) % Math.max(1, source.length - window);
@@ -2432,7 +2460,10 @@
       if (!text || !text.trim()) return;
       const cleaned = cleanTrainingText(text, 4000);
       if (!isUsefulTrainingText(cleaned, { minQuality: 0.3, minEntropy: 0.28, minDialogue: 0.18, minLength: 8 })) return;
-      this.persistentContext = sanitizePersistentContext(`${this.persistentContext}\n${cleaned}`, 16000);
+      this.recentTranscript.push({ at: Date.now(), text: cleaned.slice(0, 1400) });
+      this.recentTranscript = this.recentTranscript.slice(-32);
+      if (this.recentTranscript.length > 18 || this.persistentContext.length > 12000) this.consolidateConversationMemory();
+      this.persistentContext = sanitizePersistentContext(`${this.persistentContext}\n${cleaned}`, 12000);
       const keywords = Array.from(keywordSet(cleaned, 24));
       if (cleaned && keywords.length) {
         this.memoryBank.push({
@@ -2445,10 +2476,43 @@
       }
     }
 
+    consolidateConversationMemory(force = false) {
+      if (!force && this.recentTranscript.length < 10 && this.persistentContext.length < 12000) return this.memorySummary;
+      const source = cleanTrainingText([
+        this.memorySummary,
+        this.recentTranscript.map(item => item.text).join("\n"),
+        this.persistentContext.slice(-5000)
+      ].filter(Boolean).join("\n"), 14000);
+      const words = source.toLowerCase().match(/[a-z0-9][a-z0-9'-]{2,}/g) || [];
+      const stop = new Set("the and for you are with that this from have into your about what when where how why can will not but all was were then than they them our out use using just very more much some been also there here after before because while should would could".split(" "));
+      const counts = new Map();
+      for (const word of words) {
+        if (stop.has(word)) continue;
+        counts.set(word, (counts.get(word) || 0) + 1);
+      }
+      const keywords = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 28).map(([word]) => word);
+      const usefulLines = source
+        .split(/\n+/)
+        .map(line => cleanTrainingText(line, 280))
+        .filter(line => line.length > 24 && isUsefulTrainingText(line, { minQuality: 0.28, minEntropy: 0.25, minDialogue: 0.12, minLength: 16 }))
+        .slice(-16);
+      const summary = [
+        keywords.length ? `Long-term gist keywords: ${keywords.join(", ")}.` : "",
+        ...usefulLines.slice(-8)
+      ].filter(Boolean).join("\n");
+      this.memorySummary = sanitizePersistentContext(summary, 6000);
+      this.persistentContext = sanitizePersistentContext(this.persistentContext.slice(-7000), 9000);
+      this.recentTranscript = this.recentTranscript.slice(-10);
+      return this.memorySummary;
+    }
+
     recallMemory(query, limit = 4) {
       const keys = keywordSet(query, 32);
-      if (!keys.size || !this.memoryBank.length) return "";
-      return this.memoryBank
+      const summaryHit = this.memorySummary && [...keys].some(key => this.memorySummary.toLowerCase().includes(key))
+        ? `[LONG_TERM_GIST]\n${this.memorySummary}\n[/LONG_TERM_GIST]\n`
+        : "";
+      if (!keys.size || !this.memoryBank.length) return summaryHit.trim();
+      const recalled = this.memoryBank
         .map(item => {
           const overlap = item.keywords.reduce((sum, word) => sum + (keys.has(word) ? 1 : 0), 0);
           const recency = Math.max(0, 1 - (Date.now() - (item.at || 0)) / (1000 * 60 * 60 * 24 * 7));
@@ -2459,11 +2523,13 @@
         .slice(0, limit)
         .map(row => row.item.text)
         .join("\n");
+      return `${summaryHit}${recalled}`.trim();
     }
 
     dreamReplay(options = {}) {
       const champion = this.best();
-      const sourceText = cleanTrainingText(`${this.persistentContext}\n${this.corpus}`, options.sourceChars ?? 9000);
+      this.consolidateConversationMemory();
+      const sourceText = cleanTrainingText(`${this.memorySummary}\n${this.persistentContext}\n${this.corpus}`, options.sourceChars ?? 9000);
       if (!this.memoryBank.length && !sourceText) return { dreamed: 0, loss: champion.loss, coherence: champion.coherenceScore || 0, tuned: null, lossDelta: 0 };
       const count = clamp(Math.floor(options.count ?? 6), 1, 18);
       const charBudget = clamp(Math.floor(options.maxChars ?? 1100), 240, 4000);

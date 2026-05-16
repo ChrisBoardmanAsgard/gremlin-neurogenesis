@@ -693,7 +693,7 @@ async function serverChat(prompt, options = {}, clientId = "local") {
   serverLab.best().setVocab(serverLab.vocab);
   serverLab.best().adaptDialogue(primer, isGreeting ? 0.026 : 0.016, isGreeting ? 900 : 650);
   const recalled = serverLab.recallMemory(safePrompt, 4);
-  let context = `${cleanTrainingText(serverLab.persistentContext, 1800)}\n${recalled ? `[RECALLED_MEMORY]\n${recalled}\n[/RECALLED_MEMORY]\n` : ""}${primer}`;
+  let context = `${cleanTrainingText(serverLab.memorySummary || "", 900)}\n${cleanTrainingText(serverLab.persistentContext, 1400)}\n${recalled ? `[RECALLED_MEMORY]\n${recalled}\n[/RECALLED_MEMORY]\n` : ""}${primer}`;
   let output = "";
   const toolSteps = [];
 
@@ -953,6 +953,8 @@ function applyServerModelData(data = {}, source = "model") {
     }
   }
   if (typeof data.persistentContext === "string") serverLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
+  if (typeof data.memorySummary === "string") serverLab.memorySummary = sanitizePersistentContext(data.memorySummary, 6000);
+  if (Array.isArray(data.recentTranscript)) serverLab.recentTranscript = data.recentTranscript.slice(-32);
   if (Array.isArray(data.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
   if (Array.isArray(data.history)) {
     serverLab.history = data.history
@@ -1006,6 +1008,8 @@ function saveServerModel(force = false) {
     corpus: serverLab.corpus,
     corpora: serverLab.corpora,
     persistentContext: sanitizePersistentContext(serverLab.persistentContext, 16000),
+    memorySummary: sanitizePersistentContext(serverLab.memorySummary || "", 6000),
+    recentTranscript: (serverLab.recentTranscript || []).slice(-32),
     memoryBank: sanitizeMemoryBank(serverLab.memoryBank, 240),
     curriculumLevel: serverLab.curriculumLevel,
     imageTargets: serverImageTargets,
@@ -1084,6 +1088,8 @@ function applyServerPayload(payload = {}) {
   }).filter(target => target.pixels.length >= target.size * target.size * 4);
   if (Array.isArray(payload.corpora)) serverLab.corpora = payload.corpora;
   if (typeof payload.persistentContext === "string") serverLab.persistentContext = payload.persistentContext;
+  if (typeof payload.memorySummary === "string") serverLab.memorySummary = sanitizePersistentContext(payload.memorySummary, 6000);
+  if (Array.isArray(payload.recentTranscript)) serverLab.recentTranscript = payload.recentTranscript.slice(-32);
   if (Array.isArray(payload.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(payload.memoryBank, 240);
   if (Array.isArray(payload.history)) serverLab.history = payload.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
   if (payload.curriculumLevel) serverLab.curriculumLevel = payload.curriculumLevel;
@@ -1369,6 +1375,8 @@ const server = http.createServer(async (req, res) => {
           corpus: serverLab.corpus,
           corpora: serverLab.corpora,
           persistentContext: serverLab.persistentContext,
+          memorySummary: serverLab.memorySummary,
+          recentTranscript: serverLab.recentTranscript,
           memoryBank: serverLab.memoryBank,
           curriculumLevel: serverLab.curriculumLevel,
           imageTargets: serverImageTargets,
@@ -1391,7 +1399,9 @@ const server = http.createServer(async (req, res) => {
           compact: true,
           corpus: includeCorpus ? serverLab.corpus : "",
           corpora: includeCorpus ? serverLab.corpora : [],
-          persistentContext: serverLab.persistentContext,
+         persistentContext: serverLab.persistentContext,
+          memorySummary: serverLab.memorySummary,
+          recentTranscript: serverLab.recentTranscript,
           memoryBank: serverLab.memoryBank,
           curriculumLevel: serverLab.curriculumLevel,
           imageTargets: serverImageTargets,

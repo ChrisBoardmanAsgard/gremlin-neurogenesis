@@ -131,6 +131,8 @@
         corpus: state.lab.corpus,
         corpora: state.lab.corpora,
         persistentContext: state.lab.persistentContext,
+        memorySummary: state.lab.memorySummary,
+        recentTranscript: state.lab.recentTranscript,
         memoryBank: state.lab.memoryBank,
         curriculumLevel: state.lab.curriculumLevel,
         imageTargets: state.imageTargets.map(serializableImageTarget).filter(Boolean),
@@ -1401,6 +1403,8 @@
       corpus: state.lab.corpus,
       corpora: sanitizeCorpora(state.lab.corpora).corpora,
       persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
+      memorySummary: sanitizePersistentContext(state.lab.memorySummary || "", 6000),
+      recentTranscript: (state.lab.recentTranscript || []).slice(-32),
       memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
@@ -1449,6 +1453,8 @@
       if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) during import.`);
     }
     if (typeof data.persistentContext === "string") nextLab.persistentContext = sanitizePersistentContext(data.persistentContext, 16000);
+    if (typeof data.memorySummary === "string") nextLab.memorySummary = sanitizePersistentContext(data.memorySummary, 6000);
+    if (Array.isArray(data.recentTranscript)) nextLab.recentTranscript = data.recentTranscript.slice(-32);
     if (Array.isArray(data.memoryBank)) nextLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
     if (data.curriculumLevel) nextLab.curriculumLevel = data.curriculumLevel;
     if (Array.isArray(data.history)) nextLab.history = data.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
@@ -1559,6 +1565,8 @@
       corpus: state.lab.corpus,
       corpora: sanitizeCorpora(state.lab.corpora).corpora,
       persistentContext: sanitizePersistentContext(state.lab.persistentContext, 16000),
+      memorySummary: sanitizePersistentContext(state.lab.memorySummary || "", 6000),
+      recentTranscript: (state.lab.recentTranscript || []).slice(-32),
       memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
@@ -1642,6 +1650,8 @@
       if (clean.quarantined) log(`Quarantined ${clean.quarantined} low-quality self-generated corpus item(s) from the server pull.`);
     }
     if (typeof payload.model.persistentContext === "string") state.lab.persistentContext = sanitizePersistentContext(payload.model.persistentContext, 16000);
+    if (typeof payload.model.memorySummary === "string") state.lab.memorySummary = sanitizePersistentContext(payload.model.memorySummary, 6000);
+    if (Array.isArray(payload.model.recentTranscript)) state.lab.recentTranscript = payload.model.recentTranscript.slice(-32);
     if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.model.memoryBank, 240);
     if (payload.model.curriculumLevel) state.lab.curriculumLevel = payload.model.curriculumLevel;
     if (Array.isArray(payload.model.history)) state.lab.history = payload.model.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
