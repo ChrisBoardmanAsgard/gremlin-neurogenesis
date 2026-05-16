@@ -23,6 +23,7 @@
     dreaming: false,
     deepDreaming: false,
     reflecting: false,
+    lastMemoryPressureLog: 0,
     statusTimer: 0
   };
   const MAX_IMPORTED_TEXT_CHARS = 1_200_000;
@@ -311,6 +312,23 @@
     ctx.fillText(`memory state: ${memoryState} avg ${memoryMean.toFixed(2)} sat ${(memorySaturation * 100).toFixed(0)}%`, 12, 18);
     ctx.fillText(`memory cells: ${memoryLabel}`, 12, 36);
     ctx.fillText(`species: ${activity.speciesId}`, 12, 54);
+    maybeLogMemoryPressure(activity);
+  }
+
+  function maybeLogMemoryPressure(activity) {
+    const memory = activity.memory || [];
+    const hotCells = memory
+      .map((value, index) => ({ index, pressure: Math.abs(Number(value) || 0) }))
+      .filter(cell => cell.pressure > 0.75)
+      .sort((a, b) => b.pressure - a.pressure)
+      .slice(0, 5);
+    const saturation = Number(activity.memorySaturation || 0);
+    const now = Date.now();
+    if (!hotCells.length && saturation < 0.12) return;
+    if (now - state.lastMemoryPressureLog < 20_000) return;
+    state.lastMemoryPressureLog = now;
+    if (state.lab?.triggerMemoryRepair) state.lab.triggerMemoryRepair(80);
+    log(`Memory pressure high: ${hotCells.length ? hotCells.map(cell => `m${cell.index}=${cell.pressure.toFixed(2)}`).join(", ") : `sat ${(saturation * 100).toFixed(0)}%`}. Repair-prune bias enabled for ~80 generations.`);
   }
 
   function topologyPosition(node, index, count, width, height, tick) {
@@ -1349,9 +1367,12 @@
         gradientLearningRate: Math.min(0.032, (state.lab.config.gradientLearningRate || 0.016) * 1.35),
         plasticityBoost: 2.75,
         weakTurnRepeats: 4,
+        memoryCalm: 0.11,
+        memoryCalmAfter: 0.08,
         protectScale: true,
         incrementDreamCount: false
       });
+      if (replay?.memoryCalm?.adjusted > 0 && state.lab?.triggerMemoryRepair) state.lab.triggerMemoryRepair(80);
       best.evaluateCoherence(reflectionPair, "Answer naturally, recall memory, and use controlled tools only when useful.");
       state.lab.shapeFitness(best, { protectScale: true, trainingText: reflectionPair });
       saveBrowserCheckpoint("after-deep-reflection");

@@ -1221,8 +1221,10 @@
           const idx = (Math.imul(m + 17, 2654435761) >>> 0) % this.neurons;
           const pressure = Math.abs(memory[m]);
           const candidate = Math.tanh(state[idx] * this.memoryWrite[m] * this.memorySensitivity + this.personality[m % PERSONALITY_SIZE] * 0.14);
-          const write = sigmoid(state[idx] * this.memoryIn[m] * this.memorySensitivity + this.personality[(m + 5) % PERSONALITY_SIZE] * 0.09 - pressure * 0.28) * 0.82;
-          const keep = sigmoid(state[idx] * this.memoryForget[m] * 0.62 + 0.2 - pressure * 0.34);
+          const rawWrite = sigmoid(state[idx] * this.memoryIn[m] * this.memorySensitivity + this.personality[(m + 5) % PERSONALITY_SIZE] * 0.09 - pressure * 0.28) * 0.82;
+          const rawKeep = sigmoid(state[idx] * this.memoryForget[m] * 0.62 + 0.2 - pressure * 0.34);
+          const write = Math.tanh(rawWrite * 0.92);
+          const keep = clamp(Math.tanh(rawKeep * 1.05), 0.18, 0.82);
           const nextMemory = memory[m] * keep + candidate * write * (1 - keep * 0.55);
           memory[m] = clamp(nextMemory * 0.992, -0.92, 0.92);
           const inject = (Math.imul(m + 31, 1103515245) >>> 0) % this.neurons;
@@ -1899,6 +1901,7 @@
       this.species = [];
       this.imageTrainingCursor = 0;
       this.lastImageLoss = null;
+      this.memoryRepairUntil = Number(config.memoryRepairUntil || 0);
       this.vocab = makeVocab(this.corpus, this.config.vocabSize);
       this.population = [];
       this.generation = 0;
@@ -2053,7 +2056,7 @@
       const memoryEnergy = Array.from(genome.memoryIn).reduce((sum, value, index) => {
         return sum + Math.abs(value) + Math.abs(genome.memoryForget[index] || 0) + Math.abs(genome.memoryWrite[index] || 0);
       }, 0) / Math.max(1, genome.memoryIn.length * 3);
-      const memoryBalancePenalty = Math.min(0.08, Math.max(0, memoryEnergy - 1.35) * 0.06);
+      const memoryBalancePenalty = Math.min(0.14, Math.max(0, memoryEnergy - 1.05) * 0.11);
 
       const topologyBonus = 1
         + Math.min(0.18, Math.log2(1 + neuronRatio) * 0.11)
@@ -2078,6 +2081,7 @@
       genome.toolUseBonus = toolUseBonus;
       genome.memoryStabilityBonus = memoryStabilityBonus;
       genome.memoryBalancePenalty = memoryBalancePenalty;
+      genome.memoryEnergy = memoryEnergy;
       const coherenceBonus = Math.min(0.11, Math.max(0, genome.coherenceScore || 0) * 0.11);
       const dialogueBonus = Math.min(0.14, Math.max(0, genome.dialogueScore || 0) * 0.14);
       genome.coherenceBonus = coherenceBonus;
@@ -2103,6 +2107,7 @@
       const fitnessGain = first && last && first.fitness > 0 ? (last.fitness - first.fitness) / first.fitness : 0;
       const lossGain = first && last && Number.isFinite(first.loss) && Number.isFinite(last.loss) ? first.loss - last.loss : 0;
       const dip = last && bestRecentFitness > 0 ? (bestRecentFitness - last.fitness) / bestRecentFitness : 0;
+      const repairMemory = options.forceRepair || this.generation < (this.memoryRepairUntil || 0) || (best.memoryBalancePenalty || 0) > 0.045;
       const plateau = recent.length >= 14 && Math.abs(fitnessGain) < 0.018 && Math.abs(lossGain) < 0.08;
       const healthy = (best.fitness || 0) > 0.08 && Number.isFinite(best.loss) && best.loss < 20;
       const wave = Math.sin((this.generation + 1) / 9);
@@ -2111,6 +2116,7 @@
       if (fitnessGain > 0.025 || lossGain > 0.12) neuronScale += 0.026;
       if (plateau) neuronScale += wave >= 0 ? 0.038 : -0.032;
       if (dip > 0.08 || lossGain < -0.16) neuronScale -= 0.045;
+      if (repairMemory) neuronScale -= 0.036;
       const heartbeat = plateau || Math.abs(neuronScale - 1) < 0.006
         ? (wave >= 0 ? 1 : -1) * Math.max(1, Math.round(best.neurons * 0.006))
         : 0;
@@ -2122,6 +2128,7 @@
       if (targetNeurons > best.neurons) density += 0.16;
       if (targetNeurons < best.neurons) density -= 0.12;
       if (plateau && wave < 0) density -= 0.08;
+      if (repairMemory) density -= 0.18;
       if (healthy && (best.dialogueScore || 0) > 0.35) density += 0.06;
       density = clamp(density, 2.0, 10.5);
       const synapseHeartbeat = plateau ? (wave >= 0 ? 1 : -1) * Math.max(8, Math.round(best.synapses * 0.008)) : 0;
@@ -2129,8 +2136,14 @@
       return {
         neurons: targetNeurons,
         synapses: targetSynapses,
-        mode: dip > 0.08 ? "repair-prune" : plateau ? "explore-oscillate" : fitnessGain > 0.025 ? "healthy-grow" : "steady-drift"
+        mode: repairMemory || dip > 0.08 ? "repair-prune" : plateau ? "explore-oscillate" : fitnessGain > 0.025 ? "healthy-grow" : "steady-drift"
       };
+    }
+
+    triggerMemoryRepair(generations = 75) {
+      const until = this.generation + clamp(Math.floor(generations || 75), 10, 150);
+      this.memoryRepairUntil = Math.max(this.memoryRepairUntil || 0, until);
+      return this.memoryRepairUntil;
     }
 
     evolveOnce(options = {}) {

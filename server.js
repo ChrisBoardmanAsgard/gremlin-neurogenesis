@@ -822,9 +822,12 @@ async function runServerDeepReflection(reason = "manual-pause") {
     gradientLearningRate: Math.min(0.032, (serverLab.config.gradientLearningRate || 0.016) * 1.35),
     plasticityBoost: 2.8,
     weakTurnRepeats: 4,
+    memoryCalm: 0.11,
+    memoryCalmAfter: 0.08,
     protectScale: true,
     incrementDreamCount: false
   });
+  if (replay?.memoryCalm?.adjusted > 0 && serverLab.triggerMemoryRepair) serverLab.triggerMemoryRepair(80);
   best.evaluateCoherence(`${reflection}\n${injectedContext}`, "Answer naturally, recall memory, and only use tools when useful.");
   serverLab.shapeFitness(best, { protectScale: true, trainingText: reflection });
   serverEvolution.reflections += 1;
