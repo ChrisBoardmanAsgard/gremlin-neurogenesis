@@ -31,6 +31,11 @@ self.onmessage = event => {
       corpus: job.corpus,
       corpora: job.corpora,
       persistentContext: job.persistentContext,
+      memorySummary: job.memorySummary,
+      recentTranscript: job.recentTranscript,
+      memoryBank: job.memoryBank,
+      mirrorCorpus: job.mirrorCorpus,
+      spiralPhase: job.spiralPhase,
       curriculumLevel: job.curriculumLevel,
       ...(job.workerConfig || job.config)
     });
@@ -39,6 +44,11 @@ self.onmessage = event => {
     lab.generation = job.generation || lab.generation;
     if (Array.isArray(job.corpora)) lab.corpora = job.corpora;
     if (typeof job.persistentContext === "string") lab.persistentContext = job.persistentContext;
+    if (typeof job.memorySummary === "string") lab.memorySummary = job.memorySummary;
+    if (Array.isArray(job.recentTranscript)) lab.recentTranscript = job.recentTranscript.slice(-32);
+    if (Array.isArray(job.memoryBank)) lab.memoryBank = job.memoryBank.slice(-240);
+    if (Array.isArray(job.mirrorCorpus)) lab.mirrorCorpus = job.mirrorCorpus.slice(-80);
+    if (job.spiralPhase && typeof job.spiralPhase === "object") lab.spiralPhase = { ...lab.spiralPhase, ...job.spiralPhase };
     if (job.curriculumLevel) lab.curriculumLevel = job.curriculumLevel;
     const imageTargets = normalizeImageTargets(job.imageTargets);
     const imageTarget = normalizeImageTargets(job.imageTarget ? [job.imageTarget] : [])[0] || null;
@@ -64,6 +74,11 @@ self.onmessage = event => {
       corpus: lab.corpus,
       corpora: lab.corpora,
       persistentContext: lab.persistentContext,
+      memorySummary: lab.memorySummary,
+      recentTranscript: lab.recentTranscript,
+      memoryBank: lab.memoryBank,
+      mirrorCorpus: lab.mirrorCorpus,
+      spiralPhase: lab.spiralPhase,
       curriculumLevel: lab.curriculumLevel,
       config: job.config || lab.config,
       historyPoint: lab.history.at(-1),

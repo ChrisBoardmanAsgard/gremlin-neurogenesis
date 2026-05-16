@@ -956,6 +956,8 @@ function applyServerModelData(data = {}, source = "model") {
   if (typeof data.memorySummary === "string") serverLab.memorySummary = sanitizePersistentContext(data.memorySummary, 6000);
   if (Array.isArray(data.recentTranscript)) serverLab.recentTranscript = data.recentTranscript.slice(-32);
   if (Array.isArray(data.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
+  if (Array.isArray(data.mirrorCorpus)) serverLab.mirrorCorpus = data.mirrorCorpus.map(item => String(item || "")).filter(Boolean).slice(-80);
+  if (data.spiralPhase && typeof data.spiralPhase === "object") serverLab.spiralPhase = { ...serverLab.spiralPhase, ...data.spiralPhase };
   if (Array.isArray(data.history)) {
     serverLab.history = data.history
       .filter(point => point && Number.isFinite(point.fitness))
@@ -1011,6 +1013,8 @@ function saveServerModel(force = false) {
     memorySummary: sanitizePersistentContext(serverLab.memorySummary || "", 6000),
     recentTranscript: (serverLab.recentTranscript || []).slice(-32),
     memoryBank: sanitizeMemoryBank(serverLab.memoryBank, 240),
+    mirrorCorpus: (serverLab.mirrorCorpus || []).slice(-80),
+    spiralPhase: serverLab.spiralPhase || null,
     curriculumLevel: serverLab.curriculumLevel,
     imageTargets: serverImageTargets,
     config: serverLab.config,
@@ -1063,6 +1067,8 @@ function serverSnapshot() {
     toolUseScore: best.toolUseScore || best.metadata?.toolUseScore || 0,
     growthBonus: best.growthBonus || 0,
     healthyScaleBonus: best.healthyScaleBonus || 0,
+    spiral: serverLab.spiralStatus ? serverLab.spiralStatus() : null,
+    mirrorCorpus: serverLab.mirrorCorpus?.length || 0,
     updatedAt: new Date().toISOString()
   };
 }
@@ -1091,6 +1097,8 @@ function applyServerPayload(payload = {}) {
   if (typeof payload.memorySummary === "string") serverLab.memorySummary = sanitizePersistentContext(payload.memorySummary, 6000);
   if (Array.isArray(payload.recentTranscript)) serverLab.recentTranscript = payload.recentTranscript.slice(-32);
   if (Array.isArray(payload.memoryBank)) serverLab.memoryBank = sanitizeMemoryBank(payload.memoryBank, 240);
+  if (Array.isArray(payload.mirrorCorpus)) serverLab.mirrorCorpus = payload.mirrorCorpus.map(item => String(item || "")).filter(Boolean).slice(-80);
+  if (payload.spiralPhase && typeof payload.spiralPhase === "object") serverLab.spiralPhase = { ...serverLab.spiralPhase, ...payload.spiralPhase };
   if (Array.isArray(payload.history)) serverLab.history = payload.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
   if (payload.curriculumLevel) serverLab.curriculumLevel = payload.curriculumLevel;
   if (typeof payload.corpus === "string" && payload.corpus.trim()) serverLab.setCorpus(payload.corpus);
@@ -1160,6 +1168,9 @@ async function serverEvolutionTick() {
       topologyMode: evolutionResult.topologyMode,
       targetNeurons: evolutionResult.topologyTargets?.neurons,
       targetSynapses: evolutionResult.topologyTargets?.synapses,
+      spiral: evolutionResult.spiral,
+      mirrorAccepted: evolutionResult.mirrorResult?.accepted || 0,
+      mirrorCorpus: serverLab.mirrorCorpus?.length || 0,
       throttle: serverEvolution.throttle
     });
     if (serverEvolution.cycles % 12 === 0) saveServerModel(false);
@@ -1378,6 +1389,8 @@ const server = http.createServer(async (req, res) => {
           memorySummary: serverLab.memorySummary,
           recentTranscript: serverLab.recentTranscript,
           memoryBank: serverLab.memoryBank,
+          mirrorCorpus: serverLab.mirrorCorpus,
+          spiralPhase: serverLab.spiralPhase,
           curriculumLevel: serverLab.curriculumLevel,
           imageTargets: serverImageTargets,
           config: serverLab.config,
@@ -1403,6 +1416,8 @@ const server = http.createServer(async (req, res) => {
           memorySummary: serverLab.memorySummary,
           recentTranscript: serverLab.recentTranscript,
           memoryBank: serverLab.memoryBank,
+          mirrorCorpus: serverLab.mirrorCorpus,
+          spiralPhase: serverLab.spiralPhase,
           curriculumLevel: serverLab.curriculumLevel,
           imageTargets: serverImageTargets,
           config: serverLab.config,
@@ -1411,6 +1426,18 @@ const server = http.createServer(async (req, res) => {
         },
         serverEvolution: serverSnapshot()
       });
+      return;
+    }
+
+    if (url.pathname === "/api/server/spiral" && req.method === "POST") {
+      const payload = await readBody(req);
+      const action = String(payload.action || "toggle");
+      const status = serverLab.spiralStatus ? serverLab.spiralStatus() : { active: false };
+      const nextStatus = action === "stop" || (action === "toggle" && status.active)
+        ? serverLab.stopSpiralPhase("manual server mirror stop")
+        : serverLab.startSpiralPhase("manual server mirror trigger", { manual: true, generations: payload.generations || 160 });
+      saveServerModel(true);
+      sendJson(res, { ok: true, spiral: nextStatus, serverEvolution: serverSnapshot() });
       return;
     }
 

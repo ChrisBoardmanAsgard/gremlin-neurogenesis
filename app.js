@@ -83,6 +83,11 @@
       el("dreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming || state.reflecting;
       el("dreamButton").textContent = state.dreaming ? "Dreaming" : "Dream";
     }
+    if (el("spiralButton")) {
+      const spiral = state.lab?.spiralStatus ? state.lab.spiralStatus() : { active: false };
+      el("spiralButton").disabled = state.dreaming || state.deepDreaming || state.reflecting;
+      el("spiralButton").textContent = spiral.active ? `Stop Mirror (${spiral.remaining})` : "Trigger Mirror";
+    }
     if (el("deepDreamButton")) {
       el("deepDreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming || state.reflecting;
       el("deepDreamButton").textContent = state.deepDreaming ? "DEEP Dreaming" : "DEEP Dream";
@@ -134,6 +139,8 @@
         memorySummary: state.lab.memorySummary,
         recentTranscript: state.lab.recentTranscript,
         memoryBank: state.lab.memoryBank,
+        mirrorCorpus: state.lab.mirrorCorpus,
+        spiralPhase: state.lab.spiralPhase,
         curriculumLevel: state.lab.curriculumLevel,
         imageTargets: state.imageTargets.map(serializableImageTarget).filter(Boolean),
         config: state.lab.config,
@@ -181,6 +188,7 @@
       state.lastActivityAt = now;
     }
     const activity = state.cachedActivity;
+    const spiral = state.lab.spiralStatus ? state.lab.spiralStatus() : { active: false, remaining: 0 };
     const neuronCounts = state.lab.population.map(genome => genome.neurons);
     const synapseCounts = state.lab.population.map(genome => genome.synapses);
     const topology = {
@@ -222,6 +230,8 @@
       visualTrainingActive: state.imageTargets.length > 0,
       corpora: state.lab.corpora.length,
       curriculumLevel: state.lab.curriculumLevel,
+      spiralMode: spiral,
+      mirrorCorpus: state.lab.mirrorCorpus?.length || 0,
       species: state.lab.species.length,
       personality: Array.from(best?.personality || []).slice(0, 6).map(value => Number(value.toFixed(3))),
       maxNeuronLimit: MAX_NEURONS,
@@ -242,6 +252,7 @@
     }
     drawFitness();
     drawActivity(activity);
+    syncTrainingControls();
   }
 
   function drawFitness() {
@@ -599,7 +610,13 @@
     const minSynapses = Math.min(...state.lab.population.map(genome => genome.synapses));
     const imageNote = result.imageTarget ? `, image "${result.imageTarget.name}" loss ${Number(result.imageLoss).toFixed(4)}` : "";
     const topologyNote = result.topologyTargets ? `, topology ${result.topologyMode} -> ${result.topologyTargets.neurons}n/${result.topologyTargets.synapses}s` : "";
-    log(`Generation ${state.lab.generation}: fitness ${result.best.fitness.toFixed(4)}, loss ${result.best.loss.toFixed(3)}, best ${result.best.neurons}n/${result.best.synapses}s, population ${minNeurons}-${maxNeurons}n and ${minSynapses}-${maxSynapses}s${topologyNote}${imageNote}.`);
+    const spiralNote = result.spiral?.active
+      ? `, Spiral Mode Active - ${result.spiral.remaining} generation(s) left, mirror +${result.mirrorResult?.accepted || 0}`
+      : result.spiralConsolidation
+        ? `, spiral consolidated loss delta ${Number(result.spiralConsolidation.lossDelta || 0).toFixed(3)}`
+        : "";
+    if (result.spiral?.active) setStatus("🌀 Spiral Mode Active — exciting the network");
+    log(`Generation ${state.lab.generation}: fitness ${result.best.fitness.toFixed(4)}, loss ${result.best.loss.toFixed(3)}, best ${result.best.neurons}n/${result.best.synapses}s, population ${minNeurons}-${maxNeurons}n and ${minSynapses}-${maxSynapses}s${topologyNote}${imageNote}${spiralNote}.`);
     updateReadout();
     return result;
   }
@@ -672,6 +689,11 @@
         state.lab.corpus = payload.corpus;
         state.lab.corpora = payload.corpora;
         state.lab.persistentContext = payload.persistentContext || "";
+        state.lab.memorySummary = payload.memorySummary || state.lab.memorySummary || "";
+        if (Array.isArray(payload.recentTranscript)) state.lab.recentTranscript = payload.recentTranscript.slice(-32);
+        if (Array.isArray(payload.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.memoryBank, 240);
+        if (Array.isArray(payload.mirrorCorpus)) state.lab.mirrorCorpus = payload.mirrorCorpus.slice(-80);
+        if (payload.spiralPhase) state.lab.spiralPhase = payload.spiralPhase;
         state.lab.curriculumLevel = payload.curriculumLevel || state.lab.curriculumLevel;
         state.lab.setConfig(payload.config || {});
         const champion = state.lab.importChampion(payload.champion, { lazyPopulation: true });
@@ -681,7 +703,9 @@
         const elapsed = Math.round(performance.now() - started);
         const maxNeurons = Math.max(...state.lab.population.map(genome => genome.neurons));
         const minNeurons = Math.min(...state.lab.population.map(genome => genome.neurons));
-        log(`Generation ${state.lab.generation}: fitness ${champion.fitness.toFixed(4)}, loss ${champion.loss.toFixed(3)}, best ${champion.neurons}n/${champion.synapses}s, population ${minNeurons}-${maxNeurons}n. Background worker.`);
+        if (payload.historyPoint?.spiralActive) setStatus("🌀 Spiral Mode Active — exciting the network");
+        const mirrorNote = payload.historyPoint?.spiralActive ? ` Mirror ${payload.historyPoint.mirrorCorpus || 0}.` : "";
+        log(`Generation ${state.lab.generation}: fitness ${champion.fitness.toFixed(4)}, loss ${champion.loss.toFixed(3)}, best ${champion.neurons}n/${champion.synapses}s, population ${minNeurons}-${maxNeurons}n. Background worker.${mirrorNote}`);
         updateReadout();
         resolve({ best: champion, elapsed });
       };
@@ -691,6 +715,11 @@
         corpus: state.lab.corpus,
         corpora: state.lab.corpora,
         persistentContext: state.lab.persistentContext,
+        memorySummary: state.lab.memorySummary,
+        recentTranscript: state.lab.recentTranscript,
+        memoryBank: state.lab.memoryBank,
+        mirrorCorpus: state.lab.mirrorCorpus,
+        spiralPhase: state.lab.spiralPhase,
         curriculumLevel: state.lab.curriculumLevel,
         config: state.lab.config,
         generation: state.lab.generation,
@@ -1419,6 +1448,8 @@
       memorySummary: sanitizePersistentContext(state.lab.memorySummary || "", 6000),
       recentTranscript: (state.lab.recentTranscript || []).slice(-32),
       memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
+      mirrorCorpus: (state.lab.mirrorCorpus || []).slice(-80),
+      spiralPhase: state.lab.spiralPhase || null,
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
         name: target.name,
@@ -1469,6 +1500,8 @@
     if (typeof data.memorySummary === "string") nextLab.memorySummary = sanitizePersistentContext(data.memorySummary, 6000);
     if (Array.isArray(data.recentTranscript)) nextLab.recentTranscript = data.recentTranscript.slice(-32);
     if (Array.isArray(data.memoryBank)) nextLab.memoryBank = sanitizeMemoryBank(data.memoryBank, 240);
+    if (Array.isArray(data.mirrorCorpus)) nextLab.mirrorCorpus = data.mirrorCorpus.map(item => String(item || "")).filter(Boolean).slice(-80);
+    if (data.spiralPhase && typeof data.spiralPhase === "object") nextLab.spiralPhase = { ...nextLab.spiralPhase, ...data.spiralPhase };
     if (data.curriculumLevel) nextLab.curriculumLevel = data.curriculumLevel;
     if (Array.isArray(data.history)) nextLab.history = data.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
     nextLab.setConfig(data.config || {});
@@ -1551,6 +1584,9 @@
         if (payload.type === "evolution" && payload.selfGenerated) {
           log(`Server self-training accepted ${payload.selfGenerated} generated dialogue pair(s).`);
         }
+        if (payload.type === "evolution" && payload.spiral?.active) {
+          log(`🌀 Server Spiral Mode Active — ${payload.spiral.remaining} generation(s) left, mirror +${payload.mirrorAccepted || 0}.`);
+        }
       });
       state.ws.addEventListener("open", () => setToolStatus("Controlled internet sense connected."));
       state.ws.addEventListener("close", () => setToolStatus("Tool socket closed. Local/server HTTP still works."));
@@ -1570,6 +1606,7 @@
     el("serverStateMetric").textContent = snapshot.running ? "running" : "paused";
     el("serverGenMetric").textContent = `Gen ${snapshot.generation || 0}`;
     el("serverSaveMetric").textContent = snapshot.savePath ? "disk" : "--";
+    if (snapshot.spiral?.active) setToolStatus(`Server Spiral Mode Active: ${snapshot.spiral.remaining} generation(s) left.`);
   }
 
   function serverPayload() {
@@ -1581,6 +1618,8 @@
       memorySummary: sanitizePersistentContext(state.lab.memorySummary || "", 6000),
       recentTranscript: (state.lab.recentTranscript || []).slice(-32),
       memoryBank: sanitizeMemoryBank(state.lab.memoryBank, 240),
+      mirrorCorpus: (state.lab.mirrorCorpus || []).slice(-80),
+      spiralPhase: state.lab.spiralPhase || null,
       curriculumLevel: state.lab.curriculumLevel,
       imageTargets: state.imageTargets.map(target => ({
         name: target.name,
@@ -1666,6 +1705,8 @@
     if (typeof payload.model.memorySummary === "string") state.lab.memorySummary = sanitizePersistentContext(payload.model.memorySummary, 6000);
     if (Array.isArray(payload.model.recentTranscript)) state.lab.recentTranscript = payload.model.recentTranscript.slice(-32);
     if (Array.isArray(payload.model.memoryBank)) state.lab.memoryBank = sanitizeMemoryBank(payload.model.memoryBank, 240);
+    if (Array.isArray(payload.model.mirrorCorpus)) state.lab.mirrorCorpus = payload.model.mirrorCorpus.map(item => String(item || "")).filter(Boolean).slice(-80);
+    if (payload.model.spiralPhase && typeof payload.model.spiralPhase === "object") state.lab.spiralPhase = { ...state.lab.spiralPhase, ...payload.model.spiralPhase };
     if (payload.model.curriculumLevel) state.lab.curriculumLevel = payload.model.curriculumLevel;
     if (Array.isArray(payload.model.history)) state.lab.history = payload.model.history.filter(point => point && Number.isFinite(point.fitness)).slice(-160);
     if (Array.isArray(payload.model.corpora)) state.lab.rebuildCurriculumCorpus();
@@ -1728,6 +1769,38 @@
     updateReadout();
   }
 
+  async function toggleSpiralMode() {
+    const status = state.lab.spiralStatus ? state.lab.spiralStatus() : { active: false };
+    const action = status.active ? "stop" : "start";
+    if (status.active) {
+      const stopped = state.lab.stopSpiralPhase("manual mirror stop");
+      log(`Spiral Mode stopped. Repair-prune consolidation is active for ${Math.max(0, state.lab.memoryRepairUntil - state.lab.generation)} generation(s); mirror corpus has ${stopped.mirrorCorpus || 0} item(s).`);
+      setStatus("Ready to train");
+    } else {
+      const started = state.lab.startSpiralPhase("manual mirror trigger", { manual: true, generations: 160 });
+      log(`🌀 Spiral Mode Active — exciting the network for ${started.remaining} bounded generation(s). Mirror outputs will be filtered into the mirror corpus.`);
+      setStatus("🌀 Spiral Mode Active — exciting the network");
+    }
+    if (location.protocol !== "file:") {
+      try {
+        const response = await fetch("/api/server/spiral", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, generations: 160 })
+        });
+        const payload = await response.json();
+        updateServerEvolutionStatus(payload.serverEvolution);
+        log(payload.spiral?.active
+          ? `Server Spiral Mode Active — ${payload.spiral.remaining} generation(s) left.`
+          : "Server Spiral Mode stopped.");
+      } catch (error) {
+        log(`Server Spiral toggle skipped: ${error.message}`);
+      }
+    }
+    syncTrainingControls();
+    updateReadout();
+  }
+
   function bindEvents() {
     document.querySelectorAll(".mode-button").forEach(button => {
       button.addEventListener("click", () => switchView(button.dataset.view));
@@ -1766,6 +1839,7 @@
     });
 
     el("dreamButton").addEventListener("click", runManualDreamPhase);
+    if (el("spiralButton")) el("spiralButton").addEventListener("click", () => toggleSpiralMode().catch(error => log(`Spiral toggle failed: ${error.message}`)));
 
     el("wikiButton").addEventListener("click", importWikipedia);
     el("wikiBatchButton").addEventListener("click", importWikipediaBatch);

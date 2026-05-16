@@ -1075,6 +1075,8 @@
     mutate(rate = 0.035, config = {}) {
       const mutation = clamp(rate, 0.001, 0.25);
       const scalarMutation = clamp(config.scalarMutation ?? 0.028, 0.001, 0.08);
+      const structuralMultiplier = clamp(config.structuralMutationMultiplier ?? 1, 0.4, 3);
+      const memoryMutation = mutation * clamp(config.memoryGateMutationMultiplier ?? 1, 0.5, 3);
       const targetNeurons = config.targetNeurons || this.neurons;
       const targetSynapses = config.targetSynapses || this.synapses;
       const beforeNeurons = this.neurons;
@@ -1087,7 +1089,7 @@
         Math.abs(targetNeurons - this.neurons) / Math.max(1, this.neurons) * 0.9
         + Math.abs(targetSynapses - this.synapses) / Math.max(1, this.synapses) * 0.45
       );
-      const structural = Math.random() < clamp(0.24 + topologyPressure, 0.18, 0.52);
+      const structural = Math.random() < clamp((0.24 + topologyPressure) * structuralMultiplier, 0.18, 0.82);
       if (structural) {
         const neuronSign = Math.sign(targetNeurons - this.neurons);
         const synapseSign = Math.sign(targetSynapses - this.synapses);
@@ -1130,9 +1132,9 @@
         if (Math.random() < mutation) this.outputBias[i] = clamp(this.outputBias[i] + randomWeight(0.12), -2, 2);
       }
       for (let i = 0; i < this.memoryIn.length; i++) {
-        if (Math.random() < mutation) this.memoryIn[i] = clamp(this.memoryIn[i] + randomWeight(0.25), -3, 3);
-        if (Math.random() < mutation) this.memoryForget[i] = clamp(this.memoryForget[i] + randomWeight(0.25), -3, 3);
-        if (Math.random() < mutation) this.memoryWrite[i] = clamp(this.memoryWrite[i] + randomWeight(0.25), -3, 3);
+        if (Math.random() < memoryMutation) this.memoryIn[i] = clamp(this.memoryIn[i] + randomWeight(0.25), -3, 3);
+        if (Math.random() < memoryMutation) this.memoryForget[i] = clamp(this.memoryForget[i] + randomWeight(0.25), -3, 3);
+        if (Math.random() < memoryMutation) this.memoryWrite[i] = clamp(this.memoryWrite[i] + randomWeight(0.25), -3, 3);
       }
       for (let i = 0; i < this.memoryOut.length; i++) {
         if (Math.random() < mutation) this.memoryOut[i] = clamp(this.memoryOut[i] + randomWeight(0.18), -2, 2);
@@ -1242,7 +1244,8 @@
       const saturationRatio = highActivity / Math.max(1, this.neurons);
       const inhibitoryMean = inhibitoryActivity / Math.max(1, inhibitoryCount);
       const noisePressure = clamp(averageActivity * 1.15 + saturationRatio * 1.8, 0, 1);
-      const inhibitoryBrake = clamp((noisePressure - 0.28) * 1.35 + inhibitoryMean * 0.22, 0, 0.62);
+      const spiralExcitation = clamp(Number(this.spiralExcitation || 0), 0, 0.45);
+      const inhibitoryBrake = clamp((noisePressure - 0.28) * 1.35 + inhibitoryMean * 0.22, 0, 0.62) * (1 - spiralExcitation);
       if (inhibitoryBrake > 0.001) {
         for (let i = 0; i < this.neurons; i++) {
           const type = this.neuronTypes[i] || 0;
@@ -1271,8 +1274,8 @@
         next[to] += signal;
       }
       if (memory) {
-        const memoryWriteBrake = 1 - inhibitoryBrake * 0.58;
-        const memoryKeepBrake = 1 - inhibitoryBrake * 0.34;
+        const memoryWriteBrake = clamp(1 - inhibitoryBrake * 0.58 + spiralExcitation * 0.12, 0.45, 1.12);
+        const memoryKeepBrake = clamp(1 - inhibitoryBrake * 0.34 + spiralExcitation * 0.06, 0.5, 1.06);
         let memoryMean = 0;
         let memoryHot = 0;
         for (let m = 0; m < MEMORY_SIZE; m++) {
@@ -1970,6 +1973,17 @@
       this.memorySummary = cleanTrainingText(config.memorySummary || "", 6000);
       this.recentTranscript = Array.isArray(config.recentTranscript) ? config.recentTranscript.slice(-24) : [];
       this.memoryBank = Array.isArray(config.memoryBank) ? config.memoryBank.slice(-240) : [];
+      this.mirrorCorpus = Array.isArray(config.mirrorCorpus) ? config.mirrorCorpus.slice(-80) : [];
+      this.spiralPhase = {
+        active: false,
+        untilGeneration: 0,
+        startedAtGeneration: 0,
+        startFitness: 0,
+        reason: "",
+        manual: false,
+        maxGenerations: 0,
+        ...(config.spiralPhase || {})
+      };
       this.curriculumLevel = config.curriculumLevel || 1;
       this.species = [];
       this.imageTrainingCursor = 0;
@@ -1988,6 +2002,77 @@
       const stable = Number.isFinite(genome.stableFitness) ? genome.stableFitness : 0;
       const best = Number.isFinite(genome.metadata?.bestFitness) ? genome.metadata.bestFitness : 0;
       return Math.max(current, stable * 0.992, best * 0.975);
+    }
+
+    spiralStatus() {
+      if (this.spiralPhase?.active && this.generation >= this.spiralPhase.untilGeneration) {
+        this.spiralPhase.active = false;
+        this.spiralPhase.lastExitReason = "max-generations";
+        this.triggerMemoryRepair(100);
+      }
+      return {
+        active: Boolean(this.spiralPhase?.active),
+        remaining: Math.max(0, (this.spiralPhase?.untilGeneration || 0) - this.generation),
+        reason: this.spiralPhase?.reason || "",
+        startedAtGeneration: this.spiralPhase?.startedAtGeneration || 0,
+        startFitness: this.spiralPhase?.startFitness || 0,
+        manual: Boolean(this.spiralPhase?.manual),
+        mirrorCorpus: this.mirrorCorpus.length
+      };
+    }
+
+    innovationDiversity() {
+      let total = 0;
+      const unique = new Set();
+      for (const genome of this.population) {
+        const step = Math.max(1, Math.floor((genome.innovations?.length || 0) / 800));
+        for (let i = 0; i < (genome.innovations?.length || 0); i += step) {
+          unique.add(genome.innovations[i]);
+          total += 1;
+        }
+      }
+      return total ? unique.size / total : 1;
+    }
+
+    shouldTriggerSpiral() {
+      if (this.spiralStatus().active || this.generation < 60) return null;
+      const recent = this.history.slice(-55).filter(point => Number.isFinite(point.fitness));
+      if (recent.length >= 50) {
+        const first = recent[0].fitness || 0;
+        const last = recent[recent.length - 1].fitness || 0;
+        const delta = first > 0 ? (last - first) / first : 0;
+        if (delta < 0.008) return `fitness plateau ${delta.toFixed(3)} over ${recent.length} generations`;
+      }
+      const diversity = this.innovationDiversity();
+      if (diversity < 0.18 && this.population.length >= 6) return `innovation diversity low ${diversity.toFixed(2)}`;
+      const summaryEntropy = textEntropy(this.memorySummary || "");
+      if ((this.memorySummary || "").length > 400 && summaryEntropy < 0.42) return `memory summary stale entropy ${summaryEntropy.toFixed(2)}`;
+      return null;
+    }
+
+    startSpiralPhase(reason = "manual mirror trigger", options = {}) {
+      const duration = clamp(Math.floor(options.generations || options.duration || 160), 100, 300);
+      const best = this.best();
+      this.spiralPhase = {
+        active: true,
+        untilGeneration: this.generation + duration,
+        startedAtGeneration: this.generation,
+        startFitness: best?.fitness || 0,
+        reason,
+        manual: Boolean(options.manual),
+        maxGenerations: duration,
+        lastExitReason: ""
+      };
+      return this.spiralStatus();
+    }
+
+    stopSpiralPhase(reason = "manual stop") {
+      if (!this.spiralPhase) this.spiralPhase = {};
+      this.spiralPhase.active = false;
+      this.spiralPhase.untilGeneration = this.generation;
+      this.spiralPhase.lastExitReason = reason;
+      this.triggerMemoryRepair(110);
+      return this.spiralStatus();
     }
 
     seed() {
@@ -2070,7 +2155,10 @@
     trainingSlice(maxChars = 760) {
       this.curriculumLevel = clamp(1 + Math.floor(this.generation / 250), 1, 10);
       this.rebuildCurriculumCorpus();
-      const source = `${this.memorySummary}\n${this.persistentContext}\n${this.corpus}`;
+      const mirrorText = this.spiralStatus().active
+        ? this.mirrorCorpus.slice(-24).join("\n")
+        : this.mirrorCorpus.slice(-6).join("\n");
+      const source = `${this.memorySummary}\n${this.persistentContext}\n${mirrorText}\n${this.corpus}`;
       if (source.length <= maxChars) return source;
       const window = Math.max(maxChars, 120);
       const offset = (this.generation * 997) % Math.max(1, source.length - window);
@@ -2191,12 +2279,16 @@
       genome.inhibitoryBalance = inhibitoryBalance;
       const coherenceBonus = Math.min(0.11, Math.max(0, genome.coherenceScore || 0) * 0.11);
       const dialogueBonus = Math.min(0.14, Math.max(0, genome.dialogueScore || 0) * 0.14);
+      const spiralNoveltyBonus = options.spiralActive
+        ? Math.min(0.22, Math.max(0, genome.spiralNoveltyScore || 0) * 0.22)
+        : 0;
       genome.coherenceBonus = coherenceBonus;
       genome.dialogueBonus = dialogueBonus;
+      genome.spiralNoveltyBonus = spiralNoveltyBonus;
 
       const scaleFloor = options.protectScale === false ? 0.18 : 0.72;
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
-      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus) * (1 - memoryBalancePenalty);
+      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty);
       if (genome.origin === "immigrant" && neuronRatio < 0.55) genome.fitness *= 0.62;
       genome.stableFitness = clamp(Math.max(genome.fitness, (genome.stableFitness || 0) * 0.992), 0, Math.max(1, genome.fitness * 1.35 + 0.1));
       genome.metadata = { ...(genome.metadata || {}) };
@@ -2215,6 +2307,7 @@
       const lossGain = first && last && Number.isFinite(first.loss) && Number.isFinite(last.loss) ? first.loss - last.loss : 0;
       const dip = last && bestRecentFitness > 0 ? (bestRecentFitness - last.fitness) / bestRecentFitness : 0;
       const repairMemory = options.forceRepair || this.generation < (this.memoryRepairUntil || 0) || (best.memoryBalancePenalty || 0) > 0.045;
+      const spiralActive = this.spiralStatus().active;
       const plateau = recent.length >= 14 && Math.abs(fitnessGain) < 0.018 && Math.abs(lossGain) < 0.08;
       const healthy = (best.fitness || 0) > 0.08 && Number.isFinite(best.loss) && best.loss < 20;
       const wave = Math.sin((this.generation + 1) / 9);
@@ -2224,6 +2317,7 @@
       if (plateau) neuronScale += wave >= 0 ? 0.038 : -0.032;
       if (dip > 0.08 || lossGain < -0.16) neuronScale -= 0.045;
       if (repairMemory) neuronScale -= 0.036;
+      if (spiralActive) neuronScale += 0.034 + Math.max(0, wave) * 0.018;
       const heartbeat = plateau || Math.abs(neuronScale - 1) < 0.006
         ? (wave >= 0 ? 1 : -1) * Math.max(1, Math.round(best.neurons * 0.006))
         : 0;
@@ -2237,13 +2331,14 @@
       if (plateau && wave < 0) density -= 0.08;
       if (repairMemory) density -= 0.18;
       if (healthy && (best.dialogueScore || 0) > 0.35) density += 0.06;
+      if (spiralActive) density += 0.22;
       density = clamp(density, 2.0, 10.5);
       const synapseHeartbeat = plateau ? (wave >= 0 ? 1 : -1) * Math.max(8, Math.round(best.synapses * 0.008)) : 0;
       const targetSynapses = clamp(Math.round(targetNeurons * density + synapseHeartbeat), 128, MAX_SYNAPSES);
       return {
         neurons: targetNeurons,
         synapses: targetSynapses,
-        mode: repairMemory || dip > 0.08 ? "repair-prune" : plateau ? "explore-oscillate" : fitnessGain > 0.025 ? "healthy-grow" : "steady-drift"
+        mode: spiralActive ? "spiral-mirror" : repairMemory || dip > 0.08 ? "repair-prune" : plateau ? "explore-oscillate" : fitnessGain > 0.025 ? "healthy-grow" : "steady-drift"
       };
     }
 
@@ -2253,13 +2348,105 @@
       return this.memoryRepairUntil;
     }
 
+    consolidateSpiralPhase(reason = "spiral exit") {
+      const replay = this.dreamReplay({
+        count: 10,
+        maxChars: 1400,
+        maxTokens: 360,
+        gradientSteps: 1,
+        plasticityBoost: 2.35,
+        memoryCalm: 0.1,
+        memoryCalmAfter: 0.08,
+        includeCorpus: true,
+        protectScale: true
+      });
+      this.triggerMemoryRepair(120);
+      this.spiralPhase = { ...(this.spiralPhase || {}), active: false, lastExitReason: reason };
+      return replay;
+    }
+
+    runMirrorLoop(champion = this.best(), trainingText = "", options = {}) {
+      if (!champion) return { accepted: 0, novelty: 0, bestScore: 0 };
+      const recent = this.recentTranscript.slice(-16).map(item => item.text || "").filter(Boolean);
+      const mirrorSource = cleanTrainingText([
+        this.memorySummary,
+        this.persistentContext.slice(-2400),
+        recent.join("\n"),
+        this.mirrorCorpus.slice(-12).join("\n"),
+        trainingText
+      ].filter(Boolean).join("\n"), options.sourceChars || 3600);
+      const fragments = mirrorSource
+        .split(/(?<=[.!?])\s+|\n+/)
+        .map(part => cleanGeneratedText(part, 220))
+        .filter(part => part.length >= 24)
+        .slice(-10);
+      const prompts = [
+        `Reflect on what you just said: ${fragments.at(-1) || "I am learning to answer more coherently."}`,
+        `What would your mirror self hallucinate here, then correct into something useful? ${fragments.at(-2) || ""}`,
+        `Find a fresh angle that differs from memory, but stays meaningful: ${fragments.at(-3) || ""}`,
+        "Mirror check: describe one flaw in your last answer and one better pattern."
+      ];
+      const oldExcitation = champion.spiralExcitation || 0;
+      const oldPlasticity = champion.plasticityRate;
+      champion.spiralExcitation = clamp(options.excitation ?? 0.32, 0, 0.45);
+      champion.plasticityRate = clamp(oldPlasticity * (options.plasticityBoost ?? 1.45), 0, 0.04);
+      const maxPrompts = clamp(Math.floor(options.maxPrompts || 3), 1, 4);
+      let accepted = 0;
+      let bestScore = 0;
+      let noveltyTotal = 0;
+      const acceptedPairs = [];
+      try {
+        for (let i = 0; i < maxPrompts; i++) {
+          const prompt = prompts[i % prompts.length];
+          const response = cleanGeneratedText(champion.generate(prompt, options.maxOutput || 300, 1.08 + i * 0.08), 520);
+          if (!response) continue;
+          const novelty = clamp(1 - ngramOverlapScore(response, mirrorSource), 0, 1);
+          const entropy = textEntropy(response);
+          const quality = chatQualityScore(response);
+          const dialogue = naturalDialogueScore(response);
+          const score = quality * 0.28 + dialogue * 0.24 + entropy * 0.18 + novelty * 0.3;
+          bestScore = Math.max(bestScore, score);
+          noveltyTotal += novelty;
+          if (score < (options.minScore ?? 0.42) || entropy < 0.38 || novelty < 0.22) continue;
+          const pair = formatDialoguePair(prompt, response);
+          acceptedPairs.push(pair);
+          this.mirrorCorpus.push(pair);
+          accepted += 1;
+        }
+        this.mirrorCorpus = this.mirrorCorpus.slice(-80);
+        if (acceptedPairs.length) {
+          const replay = `${CHAT_PRIMER_TEXT}\n${acceptedPairs.join("\n")}`;
+          champion.adaptDialogue(replay, options.adaptRate || 0.02, options.maxChars || 1000);
+          champion.gradientFineTune(replay, {
+            dialogueMode: true,
+            steps: options.gradientSteps ?? 1,
+            learningRate: options.gradientLearningRate || Math.min(0.03, (this.config.gradientLearningRate || 0.016) * 1.4),
+            maxTokens: options.maxTokens || 260
+          });
+          champion.evaluateDialogue(replay, options.maxChars || 1000);
+          champion.evaluateCoherence(`${mirrorSource}\n${replay}`, "Answer with a novel but coherent reflection.");
+          this.remember(`Mirror corpus accepted ${accepted} reflection(s), best score ${bestScore.toFixed(2)}.`);
+        }
+      } finally {
+        champion.spiralExcitation = oldExcitation;
+        champion.plasticityRate = oldPlasticity;
+      }
+      const novelty = noveltyTotal / Math.max(1, maxPrompts || 1);
+      champion.spiralNoveltyScore = clamp((champion.spiralNoveltyScore || 0) * 0.72 + novelty * 0.28 + accepted * 0.035, 0, 1);
+      return { accepted, novelty, bestScore, mirrorCorpus: this.mirrorCorpus.length };
+    }
+
     evolveOnce(options = {}) {
       const start = performance.now();
+      const autoSpiralReason = options.spiral !== false ? this.shouldTriggerSpiral() : null;
+      if (autoSpiralReason) this.startSpiralPhase(autoSpiralReason);
+      const spiral = this.spiralStatus();
       const topologyTargets = this.adaptiveTopologyTargets(options);
       const fitnessOptions = {
         ...options,
         targetNeurons: options.targetNeurons || topologyTargets.neurons,
-        targetSynapses: options.targetSynapses || topologyTargets.synapses
+        targetSynapses: options.targetSynapses || topologyTargets.synapses,
+        spiralActive: spiral.active
       };
       const trainingText = options.trainingText || this.trainingSlice(options.maxChars || 760);
       const imageTargets = Array.isArray(options.imageTargets) ? options.imageTargets.filter(Boolean) : [];
@@ -2291,7 +2478,8 @@
       }
       const species = this.speciate();
       const champion = this.population[0].clone();
-      const mutationRate = clamp(this.config.mutation * (options.mutationMultiplier || 1), 0.001, 0.25);
+      const spiralMutationBoost = spiral.active ? 1.72 : 1;
+      const mutationRate = clamp(this.config.mutation * (options.mutationMultiplier || 1) * spiralMutationBoost, 0.001, 0.25);
       if (dialogueMode) {
         const beforeLoss = champion.loss;
         champion.adaptDialogue(trainingText, 0.014, options.dialogueMaxChars || 900);
@@ -2331,6 +2519,15 @@
         });
         this.shapeFitness(champion, fitnessOptions);
       }
+      let mirrorResult = { accepted: 0, novelty: 0, bestScore: 0, mirrorCorpus: this.mirrorCorpus.length };
+      if (spiral.active) {
+        mirrorResult = this.runMirrorLoop(champion, trainingText, {
+          maxPrompts: options.mirrorPrompts || 3,
+          maxOutput: options.mirrorMaxOutput || 300,
+          gradientSteps: options.mirrorGradientSteps ?? 1
+        });
+        this.shapeFitness(champion, fitnessOptions);
+      }
 
       const targetPopulationSize = this.population.length < this.config.populationSize
         ? Math.min(this.config.populationSize, this.population.length + (options.populationSpawn || 2))
@@ -2356,7 +2553,9 @@
           parent.mutate(mutationRate, {
             targetNeurons: fitnessOptions.targetNeurons,
             targetSynapses: fitnessOptions.targetSynapses,
-            scalarMutation: options.scalarMutation ?? this.config.scalarMutation
+            scalarMutation: options.scalarMutation ?? this.config.scalarMutation,
+            structuralMutationMultiplier: spiral.active ? 1.65 : 1,
+            memoryGateMutationMultiplier: spiral.active ? 1.9 : 1
           });
           next.push(parent);
         }
@@ -2371,13 +2570,23 @@
         parent.mutate(mutationRate, {
           targetNeurons: fitnessOptions.targetNeurons,
           targetSynapses: fitnessOptions.targetSynapses,
-          scalarMutation: options.scalarMutation ?? this.config.scalarMutation
+          scalarMutation: options.scalarMutation ?? this.config.scalarMutation,
+          structuralMutationMultiplier: spiral.active ? 1.65 : 1,
+          memoryGateMutationMultiplier: spiral.active ? 1.9 : 1
         });
         next.push(parent);
       }
       this.population = next;
       this.generation += 1;
       this.population[0].generation = this.generation;
+      let spiralConsolidation = null;
+      const activeAfterGeneration = this.spiralStatus();
+      if (spiral.active && activeAfterGeneration.active && spiral.startFitness > 0 && this.population[0].fitness >= spiral.startFitness * 1.08) {
+        spiralConsolidation = this.consolidateSpiralPhase("fitness-improved");
+      } else if (spiral.active && !activeAfterGeneration.active) {
+        spiralConsolidation = this.consolidateSpiralPhase("max-generations");
+      }
+      const finalSpiral = this.spiralStatus();
       const elapsed = Math.round(performance.now() - start);
       const best = this.population[0];
       this.history.push({
@@ -2392,10 +2601,13 @@
         synapses: best.synapses,
         targetNeurons: fitnessOptions.targetNeurons,
         targetSynapses: fitnessOptions.targetSynapses,
-        topologyMode: topologyTargets.mode
+        topologyMode: topologyTargets.mode,
+        spiralActive: finalSpiral.active,
+        spiralReason: finalSpiral.reason,
+        mirrorCorpus: this.mirrorCorpus.length
       });
       if (this.history.length > 160) this.history.shift();
-      return { best, elapsed, species, imageTarget, imageLoss: this.lastImageLoss, topologyTargets, topologyMode: topologyTargets.mode };
+      return { best, elapsed, species, imageTarget, imageLoss: this.lastImageLoss, topologyTargets, topologyMode: topologyTargets.mode, spiral: finalSpiral, mirrorResult, spiralConsolidation };
     }
 
     importChampion(data, options = {}) {
@@ -2556,7 +2768,7 @@
     dreamReplay(options = {}) {
       const champion = this.best();
       this.consolidateConversationMemory();
-      const sourceText = cleanTrainingText(`${this.memorySummary}\n${this.persistentContext}\n${this.corpus}`, options.sourceChars ?? 9000);
+      const sourceText = cleanTrainingText(`${this.memorySummary}\n${this.persistentContext}\n${this.mirrorCorpus.slice(-24).join("\n")}\n${this.corpus}`, options.sourceChars ?? 9000);
       if (!this.memoryBank.length && !sourceText) return { dreamed: 0, loss: champion.loss, coherence: champion.coherenceScore || 0, tuned: null, lossDelta: 0 };
       const count = clamp(Math.floor(options.count ?? 6), 1, 18);
       const charBudget = clamp(Math.floor(options.maxChars ?? 1100), 240, 4000);
