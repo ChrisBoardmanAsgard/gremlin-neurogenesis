@@ -305,8 +305,12 @@
     const memoryLabel = memoryEnergy > 0.0001
       ? memory.slice(0, 6).map(value => value.toFixed(2)).join(" ")
       : "warming up";
-    ctx.fillText(`memory gates: ${memoryLabel}`, 12, 18);
-    ctx.fillText(`species: ${activity.speciesId}`, 12, 36);
+    const memoryMean = Number(activity.memoryMean || 0);
+    const memorySaturation = Number(activity.memorySaturation || 0);
+    const memoryState = memorySaturation > 0.35 ? "heavy" : memoryMean > 0.22 ? "active" : "light";
+    ctx.fillText(`memory state: ${memoryState} avg ${memoryMean.toFixed(2)} sat ${(memorySaturation * 100).toFixed(0)}%`, 12, 18);
+    ctx.fillText(`memory cells: ${memoryLabel}`, 12, 36);
+    ctx.fillText(`species: ${activity.speciesId}`, 12, 54);
   }
 
   function topologyPosition(node, index, count, width, height, tick) {

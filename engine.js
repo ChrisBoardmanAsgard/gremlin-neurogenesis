@@ -1200,12 +1200,14 @@
       if (memory) {
         for (let m = 0; m < MEMORY_SIZE; m++) {
           const idx = (Math.imul(m + 17, 2654435761) >>> 0) % this.neurons;
-          const candidate = Math.tanh(state[idx] * this.memoryWrite[m] * this.memorySensitivity + this.personality[m % PERSONALITY_SIZE] * 0.18);
-          const write = sigmoid(state[idx] * this.memoryIn[m] * this.memorySensitivity + this.personality[(m + 5) % PERSONALITY_SIZE] * 0.12);
-          const keep = sigmoid(state[idx] * this.memoryForget[m] + 0.85);
-          memory[m] = memory[m] * keep + candidate * write * (1 - keep * 0.45);
+          const pressure = Math.abs(memory[m]);
+          const candidate = Math.tanh(state[idx] * this.memoryWrite[m] * this.memorySensitivity + this.personality[m % PERSONALITY_SIZE] * 0.16);
+          const write = sigmoid(state[idx] * this.memoryIn[m] * this.memorySensitivity + this.personality[(m + 5) % PERSONALITY_SIZE] * 0.1 - pressure * 0.18) * 0.92;
+          const keep = sigmoid(state[idx] * this.memoryForget[m] * 0.75 + 0.45 - pressure * 0.22);
+          const nextMemory = memory[m] * keep + candidate * write * (1 - keep * 0.55);
+          memory[m] = clamp(nextMemory, -0.98, 0.98);
           const inject = (Math.imul(m + 31, 1103515245) >>> 0) % this.neurons;
-          next[inject] += memory[m] * (this.neuronTypes[inject] === 4 ? 0.085 : 0.05);
+          next[inject] += memory[m] * (this.neuronTypes[inject] === 4 ? 0.07 : 0.04);
         }
       }
       for (let i = 0; i < this.neurons; i++) state[i] = Math.tanh(next[i]);
@@ -1690,9 +1692,13 @@
       for (let i = 0; i < state.length; i++) buckets[i % buckets.length] += Math.abs(state[i]);
       let max = 0;
       for (const value of buckets) max = Math.max(max, value);
+      const memoryMean = memory.reduce((sum, value) => sum + Math.abs(value), 0) / Math.max(1, memory.length);
+      const memorySaturation = memory.reduce((sum, value) => sum + (Math.abs(value) > 0.72 ? 1 : 0), 0) / Math.max(1, memory.length);
       return {
         buckets: Array.from(buckets, value => max ? value / max : 0),
         memory: Array.from(memory),
+        memoryMean,
+        memorySaturation,
         personality: Array.from(this.personality),
         neuronTypes: NEURON_TYPES.map((name, index) => ({
           name,
@@ -2028,6 +2034,7 @@
       const memoryEnergy = Array.from(genome.memoryIn).reduce((sum, value, index) => {
         return sum + Math.abs(value) + Math.abs(genome.memoryForget[index] || 0) + Math.abs(genome.memoryWrite[index] || 0);
       }, 0) / Math.max(1, genome.memoryIn.length * 3);
+      const memoryBalancePenalty = Math.min(0.08, Math.max(0, memoryEnergy - 1.35) * 0.06);
 
       const topologyBonus = 1
         + Math.min(0.18, Math.log2(1 + neuronRatio) * 0.11)
@@ -2051,6 +2058,7 @@
       genome.healthyScaleBonus = healthyScaleBonus;
       genome.toolUseBonus = toolUseBonus;
       genome.memoryStabilityBonus = memoryStabilityBonus;
+      genome.memoryBalancePenalty = memoryBalancePenalty;
       const coherenceBonus = Math.min(0.11, Math.max(0, genome.coherenceScore || 0) * 0.11);
       const dialogueBonus = Math.min(0.14, Math.max(0, genome.dialogueScore || 0) * 0.14);
       genome.coherenceBonus = coherenceBonus;
@@ -2058,7 +2066,7 @@
 
       const scaleFloor = options.protectScale === false ? 0.18 : 0.72;
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
-      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus);
+      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus) * (1 - memoryBalancePenalty);
       if (genome.origin === "immigrant" && neuronRatio < 0.55) genome.fitness *= 0.62;
       genome.stableFitness = clamp(Math.max(genome.fitness, (genome.stableFitness || 0) * 0.992), 0, Math.max(1, genome.fitness * 1.35 + 0.1));
       genome.metadata = { ...(genome.metadata || {}) };
