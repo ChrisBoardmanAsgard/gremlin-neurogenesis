@@ -450,35 +450,43 @@
       const before = state.lab.best();
       const beforeLoss = before.loss || 0;
       const epochs = clamp(Number(el("dreamEpochsInput")?.value || 12), 5, 25);
+      const dreamProfile = manualDreamProfile(epochs);
       const spinner = ["|", "/", "-", "\\"];
       let result = null;
       let traces = 0;
+      let adjustedMemory = 0;
       for (let epoch = 1; epoch <= epochs; epoch++) {
         const epochStarted = performance.now();
-        log(`${spinner[(epoch - 1) % spinner.length]} Dreaming... (${epoch}/${epochs} epochs)`);
+        const deepTune = epoch === epochs || epoch % dreamProfile.deepEvery === 0;
+        log(`${spinner[(epoch - 1) % spinner.length]} Dreaming... (${epoch}/${epochs} epochs, ${dreamProfile.label}${deepTune ? " + tune" : ""})`);
         result = state.lab.dreamReplay({
-          count: epochs >= 25 ? 14 : epochs >= 12 ? 10 : 6,
-          maxChars: Number(state.lab.config.neurons) > 1800 ? 1200 : 1700,
-          maxTokens: Number(state.lab.config.neurons) > 1800 ? 440 : 620,
-          gradientSteps: epochs >= 25 ? 2 : 1,
-          gradientLearningRate: Math.min(0.03, (state.lab.config.gradientLearningRate || 0.016) * (epochs >= 25 ? 1.2 : 1.4)),
-          plasticityBoost: epochs >= 25 ? 2.2 : 2.6,
-          weakTurnRepeats: epochs >= 12 ? 3 : 2,
+          count: dreamProfile.count,
+          maxChars: dreamProfile.maxChars,
+          maxTokens: dreamProfile.maxTokens,
+          gradientSteps: deepTune ? dreamProfile.gradientSteps : 0,
+          gradientLearningRate: dreamProfile.gradientLearningRate,
+          plasticityBoost: dreamProfile.plasticityBoost,
+          weakTurnRepeats: dreamProfile.weakTurnRepeats,
+          memoryCalm: dreamProfile.memoryCalm,
+          memoryCalmAfter: dreamProfile.memoryCalmAfter,
           incrementDreamCount: epoch === epochs
         });
         traces += result.dreamed || 0;
+        adjustedMemory += result.memoryCalm?.adjusted || 0;
         if (epoch % 3 === 0 || epoch === epochs) updateReadout();
-        if (performance.now() - epochStarted > 3500) {
-          log("Dream phase auto-paused early to keep the browser responsive.");
-          break;
+        const elapsed = performance.now() - epochStarted;
+        if (elapsed > dreamProfile.slowEpochMs) {
+          log(`Dream epoch ${epoch} was heavy (${Math.round(elapsed)}ms); continuing with browser breathing room.`);
+          await new Promise(resolve => setTimeout(resolve, dreamProfile.slowYieldMs));
+        } else {
+          await new Promise(resolve => setTimeout(resolve, dreamProfile.yieldMs));
         }
-        await new Promise(resolve => setTimeout(resolve, 20));
       }
       saveBrowserCheckpoint("after-manual-dream");
       result = result || { loss: beforeLoss, coherence: 0, dreamCount: state.lab.best().dreamCount || 0 };
       const lossDelta = Number.isFinite(result.lossDelta) ? result.lossDelta : beforeLoss - (result.loss || beforeLoss);
       const totalImprovement = Math.max(0, beforeLoss - (result.loss || beforeLoss));
-      log(`Dream replay consolidated ${traces} trace(s). Loss ${Number(result.loss || 0).toFixed(3)} (${lossDelta >= 0 ? "-" : "+"}${Math.abs(lossDelta).toFixed(3)}), coherence ${Number(result.coherence || 0).toFixed(2)}, lineage dreams ${result.dreamCount || state.lab.best().dreamCount || 0}.`);
+      log(`Dream replay consolidated ${traces} trace(s). Loss ${Number(result.loss || 0).toFixed(3)} (${lossDelta >= 0 ? "-" : "+"}${Math.abs(lossDelta).toFixed(3)}), coherence ${Number(result.coherence || 0).toFixed(2)}, calmed ${adjustedMemory} memory gate(s), lineage dreams ${result.dreamCount || state.lab.best().dreamCount || 0}.`);
       log(`Dream phase complete ✓ Loss improved by ${totalImprovement.toFixed(2)} — ready to train`);
       setStatus("Ready to train");
       updateReadout();
@@ -490,6 +498,60 @@
       state.dreaming = false;
       syncTrainingControls();
     }
+  }
+
+  function manualDreamProfile(epochs) {
+    const best = state.lab.best();
+    const neurons = Number(best?.neurons || state.lab.config.neurons || 400);
+    const synapses = Number(best?.synapses || state.lab.config.synapses || 1400);
+    const huge = neurons > 8500 || synapses > 45000;
+    const large = neurons > 4500 || synapses > 18000;
+    return huge ? {
+      label: "efficient large-brain replay",
+      count: epochs >= 25 ? 8 : 6,
+      maxChars: 560,
+      maxTokens: 150,
+      gradientSteps: 1,
+      gradientLearningRate: Math.min(0.018, (state.lab.config.gradientLearningRate || 0.016) * 0.95),
+      plasticityBoost: 1.85,
+      weakTurnRepeats: 2,
+      deepEvery: 4,
+      memoryCalm: 0.075,
+      memoryCalmAfter: 0.045,
+      slowEpochMs: 2800,
+      yieldMs: 45,
+      slowYieldMs: 180
+    } : large ? {
+      label: "balanced replay",
+      count: epochs >= 25 ? 10 : 8,
+      maxChars: 850,
+      maxTokens: 260,
+      gradientSteps: 1,
+      gradientLearningRate: Math.min(0.024, (state.lab.config.gradientLearningRate || 0.016) * 1.15),
+      plasticityBoost: 2.15,
+      weakTurnRepeats: 2,
+      deepEvery: 3,
+      memoryCalm: 0.055,
+      memoryCalmAfter: 0.035,
+      slowEpochMs: 3200,
+      yieldMs: 30,
+      slowYieldMs: 130
+    } : {
+      label: "full replay",
+      count: epochs >= 25 ? 14 : epochs >= 12 ? 10 : 6,
+      maxChars: 1500,
+      maxTokens: 520,
+      gradientSteps: epochs >= 25 ? 2 : 1,
+      gradientLearningRate: Math.min(0.03, (state.lab.config.gradientLearningRate || 0.016) * (epochs >= 25 ? 1.2 : 1.4)),
+      plasticityBoost: epochs >= 25 ? 2.2 : 2.6,
+      weakTurnRepeats: epochs >= 12 ? 3 : 2,
+      deepEvery: 1,
+      memoryCalm: 0.035,
+      memoryCalmAfter: 0.025,
+      slowEpochMs: 3800,
+      yieldMs: 20,
+      slowYieldMs: 90
+    };
   }
 
   async function evolveStep(imageOptions = {}) {
@@ -1158,11 +1220,13 @@
           renderImage();
           updateReadout();
         }
-        if (performance.now() - epochStarted > 3200) {
-          log("DEEP Dream auto-paused early to keep the browser responsive.");
-          break;
+        const elapsed = performance.now() - epochStarted;
+        if (elapsed > 3200) {
+          log(`DEEP Dream epoch ${epoch} was heavy (${Math.round(elapsed)}ms); continuing with browser breathing room.`);
+          await new Promise(resolve => setTimeout(resolve, 160));
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 35));
         }
-        await new Promise(resolve => setTimeout(resolve, 35));
       }
       state.lab.best().plasticityRate = originalPlasticity;
       const averageLoss = totalLoss / Math.max(1, lossCount);

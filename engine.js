@@ -793,6 +793,24 @@
       for (let i = 0; i < this.memoryOut.length; i++) this.memoryOut[i] = randomWeight(0.22);
     }
 
+    calmMemoryGates(strength = 0.08) {
+      const rate = clamp(Number(strength) || 0, 0, 0.35);
+      if (!rate) return { energy: 0, adjusted: 0 };
+      let energy = 0;
+      let adjusted = 0;
+      for (let i = 0; i < this.memoryIn.length; i++) {
+        const gateEnergy = (Math.abs(this.memoryIn[i]) + Math.abs(this.memoryForget[i]) + Math.abs(this.memoryWrite[i])) / 3;
+        energy += gateEnergy;
+        if (gateEnergy < 1.05) continue;
+        const damping = 1 - rate * Math.min(1, (gateEnergy - 1.0) / 1.8);
+        this.memoryIn[i] *= damping;
+        this.memoryForget[i] *= damping * 0.985;
+        this.memoryWrite[i] *= damping;
+        adjusted += 1;
+      }
+      return { energy: energy / Math.max(1, this.memoryIn.length), adjusted };
+    }
+
     randomizePersonality() {
       for (let i = 0; i < PERSONALITY_SIZE; i++) this.personality[i] = randomWeight(0.8);
     }
@@ -1186,6 +1204,7 @@
       for (let i = 0; i < this.synapses; i++) {
         if (!this.enabled[i]) continue;
         const from = this.from[i];
+        if (Math.abs(state[from]) < 0.0004) continue;
         const to = this.to[i];
         const sourceType = this.neuronTypes[from] || 0;
         const targetType = this.neuronTypes[to] || 0;
@@ -1201,13 +1220,13 @@
         for (let m = 0; m < MEMORY_SIZE; m++) {
           const idx = (Math.imul(m + 17, 2654435761) >>> 0) % this.neurons;
           const pressure = Math.abs(memory[m]);
-          const candidate = Math.tanh(state[idx] * this.memoryWrite[m] * this.memorySensitivity + this.personality[m % PERSONALITY_SIZE] * 0.16);
-          const write = sigmoid(state[idx] * this.memoryIn[m] * this.memorySensitivity + this.personality[(m + 5) % PERSONALITY_SIZE] * 0.1 - pressure * 0.18) * 0.92;
-          const keep = sigmoid(state[idx] * this.memoryForget[m] * 0.75 + 0.45 - pressure * 0.22);
+          const candidate = Math.tanh(state[idx] * this.memoryWrite[m] * this.memorySensitivity + this.personality[m % PERSONALITY_SIZE] * 0.14);
+          const write = sigmoid(state[idx] * this.memoryIn[m] * this.memorySensitivity + this.personality[(m + 5) % PERSONALITY_SIZE] * 0.09 - pressure * 0.28) * 0.82;
+          const keep = sigmoid(state[idx] * this.memoryForget[m] * 0.62 + 0.2 - pressure * 0.34);
           const nextMemory = memory[m] * keep + candidate * write * (1 - keep * 0.55);
-          memory[m] = clamp(nextMemory, -0.98, 0.98);
+          memory[m] = clamp(nextMemory * 0.992, -0.92, 0.92);
           const inject = (Math.imul(m + 31, 1103515245) >>> 0) % this.neurons;
-          next[inject] += memory[m] * (this.neuronTypes[inject] === 4 ? 0.07 : 0.04);
+          next[inject] += memory[m] * (this.neuronTypes[inject] === 4 ? 0.058 : 0.032);
         }
       }
       for (let i = 0; i < this.neurons; i++) state[i] = Math.tanh(next[i]);
@@ -1390,12 +1409,12 @@
 
     gradientFineTune(text, options = {}) {
       const learningRate = clamp(Number(options.learningRate ?? 0.018), 0.0005, 0.08);
-      const steps = clamp(Math.floor(options.steps ?? 2), 1, 8);
+      const steps = clamp(Math.floor(options.steps ?? 2), 0, 8);
       const maxTokens = clamp(Math.floor(options.maxTokens ?? 360), 40, 1600);
       const dialogueMode = options.dialogueMode !== false;
       const sample = dialogueMode ? dialogueTrainingText(text, maxTokens * 4) : cleanTrainingText(text || DEFAULT_SEED_TEXT, maxTokens * 5);
       const tokens = encodeTokens(sample, this.vocab, maxTokens, this.tokenMatcher, this.tokenToIndex);
-      if (tokens.length < 3) return { steps: 0, loss: this.loss, tokens: tokens.length };
+      if (steps < 1 || tokens.length < 3) return { steps: 0, loss: this.loss, tokens: tokens.length };
 
       const accBias = new Float32Array(this.outputBias.length);
       const accOut = new Float32Array(this.outputWeights.length);
@@ -2424,6 +2443,7 @@
       const beforeLoss = champion.loss;
       const oldPlasticity = champion.plasticityRate;
       champion.plasticityRate = clamp(oldPlasticity * (options.plasticityBoost ?? 2.2), 0, 0.04);
+      const memoryCalmBefore = champion.calmMemoryGates(options.memoryCalm ?? 0.04);
       champion.adaptDialogue(replay, options.adaptRate ?? 0.018, options.maxChars ?? 1100);
       const tuned = champion.gradientFineTune(replay, {
         dialogueMode: true,
@@ -2434,6 +2454,7 @@
       champion.plasticityRate = oldPlasticity;
       champion.evaluateDialogue(replay, options.maxChars ?? 1100);
       champion.evaluateCoherence(replay, "Recall a useful memory and answer coherently.");
+      const memoryCalmAfter = champion.calmMemoryGates(options.memoryCalmAfter ?? 0.025);
       champion.selfTuningGain = clamp((champion.selfTuningGain || 0) + Math.max(0, (beforeLoss || champion.loss) - champion.loss) * 0.5, 0, 0.5);
       this.shapeFitness(champion, { ...options, trainingText: replay });
       if (options.incrementDreamCount) {
@@ -2446,6 +2467,10 @@
         loss: champion.loss,
         coherence: champion.coherenceScore || 0,
         tuned,
+        memoryCalm: {
+          energy: memoryCalmAfter.energy || memoryCalmBefore.energy || 0,
+          adjusted: (memoryCalmBefore.adjusted || 0) + (memoryCalmAfter.adjusted || 0)
+        },
         lossDelta: (beforeLoss || champion.loss) - champion.loss,
         dreamCount: champion.dreamCount || 0,
         mix: { recent: 0.4, memory: 0.4, corpus: options.includeCorpus === false ? 0 : 0.2, weakTurns: weakTurns.length }
