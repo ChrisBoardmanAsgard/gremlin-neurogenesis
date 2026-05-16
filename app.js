@@ -18,6 +18,7 @@
     lastActivityAt: 0,
     cachedActivity: null,
     dreaming: false,
+    deepDreaming: false,
     statusTimer: 0
   };
   const MAX_IMPORTED_TEXT_CHARS = 1_200_000;
@@ -65,13 +66,23 @@
     if (el("toolStatus")) el("toolStatus").textContent = message;
   }
 
+  function invalidateActivityCache() {
+    state.cachedActivity = null;
+    state.lastActivityAt = 0;
+  }
+
   function syncTrainingControls() {
     if (el("evolveButton")) el("evolveButton").textContent = state.evolving ? "Stop" : "Evolve";
     if (el("pauseButton")) el("pauseButton").textContent = state.evolving ? "Pause" : "Paused";
     if (el("dreamButton")) {
-      el("dreamButton").disabled = state.evolving || state.dreaming;
+      el("dreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming;
       el("dreamButton").textContent = state.dreaming ? "Dreaming" : "Dream";
     }
+    if (el("deepDreamButton")) {
+      el("deepDreamButton").disabled = state.evolving || state.dreaming || state.deepDreaming;
+      el("deepDreamButton").textContent = state.deepDreaming ? "DEEP Dreaming" : "DEEP Dream";
+    }
+    if (el("deepDreamLastButton")) el("deepDreamLastButton").disabled = state.evolving || state.dreaming || state.deepDreaming;
   }
 
   function readyToTrain() {
@@ -281,7 +292,12 @@
     }
     ctx.fillStyle = "rgba(244, 240, 223, 0.72)";
     ctx.font = "12px Consolas, monospace";
-    ctx.fillText(`memory gates: ${activity.memory.slice(0, 6).map(value => value.toFixed(2)).join(" ")}`, 12, 18);
+    const memory = activity.memory || [];
+    const memoryEnergy = memory.reduce((sum, value) => sum + Math.abs(value), 0);
+    const memoryLabel = memoryEnergy > 0.0001
+      ? memory.slice(0, 6).map(value => value.toFixed(2)).join(" ")
+      : "warming up";
+    ctx.fillText(`memory gates: ${memoryLabel}`, 12, 18);
     ctx.fillText(`species: ${activity.speciesId}`, 12, 36);
   }
 
@@ -659,26 +675,92 @@
     return payload;
   }
 
+  function imageToTarget(image, name = "image target") {
+    const size = 48;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0, size, size);
+    const imageData = ctx.getImageData(0, 0, size, size);
+    return { name, size, pixels: imageData.data, thumbnail: canvas };
+  }
+
   function loadImageTarget(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       const image = new Image();
       reader.onload = () => {
         image.onload = () => {
-          const size = 48;
-          const canvas = document.createElement("canvas");
-          canvas.width = size;
-          canvas.height = size;
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(image, 0, 0, size, size);
-          const imageData = ctx.getImageData(0, 0, size, size);
-          resolve({ name: file.name, size, pixels: imageData.data, thumbnail: canvas });
+          try {
+            resolve(imageToTarget(image, file.name));
+          } catch (error) {
+            reject(error);
+          }
         };
         image.onerror = reject;
         image.src = String(reader.result);
       };
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(file);
+    });
+  }
+
+  function parseYouTubeId(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const match = text.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/i);
+    return match ? match[1] : "";
+  }
+
+  function deepDreamSourceUrl(value) {
+    const text = String(value || "").trim();
+    const youtubeId = parseYouTubeId(text);
+    if (youtubeId) {
+      return {
+        url: `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`,
+        name: `youtube-${youtubeId}-thumbnail`,
+        note: `YouTube keyframe ${youtubeId}`
+      };
+    }
+    if (/^https:\/\/.+/i.test(text)) {
+      return { url: text, name: text.split("/").pop()?.slice(0, 80) || "deep-dream-url-image", note: "URL image" };
+    }
+    return null;
+  }
+
+  function dataUrlFromBase64(mime, data) {
+    return `data:${mime || "image/jpeg"};base64,${data}`;
+  }
+
+  async function loadImageUrlTarget(source) {
+    if (!source?.url) throw new Error("No image URL supplied");
+    let imageUrl = source.url;
+    if (location.protocol !== "file:") {
+      try {
+        const response = await fetch(`/api/import/image-url?url=${encodeURIComponent(source.url)}`);
+        const payload = await response.json();
+        if (response.ok && payload.ok && payload.data) {
+          imageUrl = dataUrlFromBase64(payload.mime, payload.data);
+        } else if (!response.ok || payload.error) {
+          throw new Error(payload.error || "Image URL fetch failed");
+        }
+      } catch (error) {
+        log(`Server image fetch skipped: ${error.message}. Trying browser image load.`);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.crossOrigin = "anonymous";
+      image.onload = () => {
+        try {
+          resolve(imageToTarget(image, source.name));
+        } catch (error) {
+          reject(new Error(`Image pixels were blocked by the browser. Save the image locally and use Add dream images. ${error.message}`));
+        }
+      };
+      image.onerror = () => reject(new Error("Could not load image URL"));
+      image.src = imageUrl;
     });
   }
 
@@ -899,6 +981,124 @@
     setStatus("Image evolved");
   }
 
+  async function addDeepDreamFiles(files) {
+    const imageFiles = Array.from(files || []).filter(file => file.type.startsWith("image/"));
+    if (!imageFiles.length) return 0;
+    let added = 0;
+    for (const file of imageFiles) {
+      try {
+        const target = await loadImageTarget(file);
+        state.imageTargets.push(target);
+        state.lastImageTarget = target;
+        state.lab.best().seeImage(target, 0.18);
+        added += 1;
+        log(`Added Deep Dream image "${file.name}".`);
+      } catch (error) {
+        log(`Deep Dream image skipped "${file.name}": ${error.message}`);
+      }
+    }
+    if (added) renderTargets();
+    if (added) setStatus(`${added} Deep Dream image${added === 1 ? "" : "s"} ready`);
+    return added;
+  }
+
+  async function runDeepDreamPhase(options = {}) {
+    if (state.evolving) {
+      log("Pause evolution before starting DEEP Dream.");
+      return;
+    }
+    if (state.deepDreaming || state.dreaming) return;
+    state.deepDreaming = true;
+    syncTrainingControls();
+    setStatus("DEEP Dreaming");
+    saveBrowserCheckpoint("before-deep-dream");
+    await new Promise(resolve => setTimeout(resolve, 30));
+    let originalPlasticity = null;
+    try {
+      const source = deepDreamSourceUrl(el("deepDreamUrl")?.value || "");
+      if (source) {
+        const target = await loadImageUrlTarget(source);
+        state.imageTargets.push(target);
+        state.lastImageTarget = target;
+        renderTargets();
+        state.lab.remember(`DEEP Dream visual source: ${source.note}. ${source.url}`);
+        log(`Loaded ${source.note} into visual memory.`);
+      }
+      const targets = options.lastOnly && state.lastImageTarget ? [state.lastImageTarget] : state.imageTargets.slice(-6);
+      if (!targets.length) {
+        log("Add a dream image or paste a YouTube/image URL before running DEEP Dream.");
+        setStatus("Add image first");
+        return;
+      }
+      if (options.lastOnly) log(`DEEP Dream focusing on last uploaded image: ${targets[0].name}.`);
+
+      const epochs = clamp(Number(el("deepDreamEpochsInput")?.value || 18), 8, 36);
+      const promptBase = `${el("imagePrompt")?.value || "visual memory"} ${source?.note || "imported image"}`.trim();
+      let totalLoss = 0;
+      let totalDelta = 0;
+      let totalCoherence = 0;
+      let lossCount = 0;
+      let attentionTouched = 0;
+      originalPlasticity = state.lab.best().plasticityRate;
+      state.lab.best().plasticityRate = clamp(originalPlasticity * 2.8, 0, 0.04);
+      log(`Deep Dream started with ${targets.length} image${targets.length === 1 ? "" : "s"}${source ? " + URL context" : ""}.`);
+      for (let epoch = 1; epoch <= epochs; epoch++) {
+        const epochStarted = performance.now();
+        const target = targets[(epoch - 1) % targets.length];
+        const rate = Number(el("imageMutation")?.value || 0.04) * (epochs >= 36 ? 0.78 : 0.95);
+        const result = state.lab.best().deepDreamVisual(target, promptBase, {
+          passes: epochs >= 36 ? 5 : epochs >= 18 ? 4 : 3,
+          learningRate: rate,
+          attentionBoost: epochs >= 36 ? 0.09 : 0.07
+        });
+        state.lab.lastImageLoss = result.loss;
+        totalLoss += result.loss;
+        totalDelta += result.delta;
+        totalCoherence += result.coherence;
+        attentionTouched += result.attentionTouched || 0;
+        lossCount += 1;
+        if (epoch % 4 === 0 || epoch === epochs) {
+          state.lab.dreamReplay({
+            count: 4,
+            maxChars: 520,
+            maxTokens: 180,
+            gradientSteps: 1,
+            plasticityBoost: 2.1,
+            includeCorpus: false,
+            incrementDreamCount: epoch === epochs
+          });
+          log(`Visual patterns integrated • Loss delta: ${totalDelta >= 0 ? "-" : "+"}${Math.abs(totalDelta).toFixed(4)} • Visual coherence: ${(totalCoherence / Math.max(1, lossCount)).toFixed(2)}`);
+        }
+        log(`DEEP Dreaming... (${epoch}/${epochs} epochs) ${target.name}, visual loss ${result.loss.toFixed(4)}`);
+        if (epoch % 3 === 0 || epoch === epochs) {
+          renderImage();
+          updateReadout();
+        }
+        if (performance.now() - epochStarted > 3200) {
+          log("DEEP Dream auto-paused early to keep the browser responsive.");
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 35));
+      }
+      state.lab.best().plasticityRate = originalPlasticity;
+      const averageLoss = totalLoss / Math.max(1, lossCount);
+      const averageCoherence = totalCoherence / Math.max(1, lossCount);
+      state.lab.remember(`DEEP Dream complete. Visual source ${source?.note || "imported image targets"}. Average visual loss ${averageLoss.toFixed(4)}.`);
+      saveBrowserCheckpoint("after-deep-dream");
+      renderImage();
+      updateReadout();
+      log(`DEEP Dream complete. Average visual loss ${averageLoss.toFixed(4)}, visual coherence ${averageCoherence.toFixed(2)}, attention boosts ${attentionTouched} - ready to train`);
+      setStatus("Ready to train");
+    } catch (error) {
+      log(`DEEP Dream paused safely: ${error.message}`);
+      setStatus("DEEP Dream paused");
+    } finally {
+      if (originalPlasticity !== null) state.lab.best().plasticityRate = originalPlasticity;
+      state.deepDreaming = false;
+      syncTrainingControls();
+    }
+  }
+
   function seeImageTarget() {
     const target = state.lastImageTarget || state.imageTargets.at(-1);
     if (!target) {
@@ -997,6 +1197,7 @@
       }
     }
     state.lab = nextLab;
+    invalidateActivityCache();
     el("corpusText").value = state.lab.corpus;
     state.imageTargets = importedImageTargets;
     state.lastImageTarget = state.imageTargets.at(-1) || null;
@@ -1157,6 +1358,7 @@
     if (Array.isArray(payload.model.corpora)) state.lab.rebuildCurriculumCorpus();
     state.lab.setConfig(payload.model.config || {});
     const genome = state.lab.importChampion(payload.model.champion, { lazyPopulation: true });
+    invalidateActivityCache();
     restoreImageTargets(payload.model.imageTargets);
     updateServerEvolutionStatus(payload.serverEvolution);
     log(`Pulled server champion: generation ${genome.generation}, ${genome.neurons} neurons, ${genome.synapses} synapses. Population will refill gradually during evolution.`);
@@ -1228,6 +1430,7 @@
     el("seedButton").addEventListener("click", () => {
       syncConfigToLab();
       state.lab.seed();
+      invalidateActivityCache();
       log(`Seeded population at ${state.lab.config.neurons} neurons and ${state.lab.config.synapses} synapses.`);
       updateReadout();
       renderImage();
@@ -1272,6 +1475,15 @@
     el("renderImageButton").addEventListener("click", renderImage);
     el("seeImageButton").addEventListener("click", seeImageTarget);
     el("evolveImageButton").addEventListener("click", evolveImage);
+    el("deepDreamButton").addEventListener("click", runDeepDreamPhase);
+    el("deepDreamLastButton").addEventListener("click", () => runDeepDreamPhase({ lastOnly: true }));
+    el("deepDreamFileButton").addEventListener("click", () => el("deepDreamFileInput").click());
+    el("deepDreamFileInput").addEventListener("change", event => {
+      addDeepDreamFiles(event.target.files).finally(() => {
+        event.target.value = "";
+        updateReadout();
+      });
+    });
     el("topologyButton").addEventListener("click", toggleTopologyView);
     el("resetFitnessButton").addEventListener("click", resetFitnessGraph);
     el("exportButton").addEventListener("click", exportModel);

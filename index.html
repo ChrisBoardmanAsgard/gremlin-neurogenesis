@@ -221,11 +221,21 @@
                 <span>Image prompt</span>
                 <input id="imagePrompt" type="text" value="bioluminescent neural city">
               </label>
+              <label class="field">
+                <span>Deep Dream URL</span>
+                <input id="deepDreamUrl" type="url" placeholder="YouTube link or direct image URL">
+              </label>
               <div class="button-row">
                 <button id="renderImageButton" type="button" class="primary">Render</button>
                 <button id="seeImageButton" type="button">See target</button>
                 <button id="evolveImageButton" type="button">Evolve image</button>
               </div>
+              <div class="button-row">
+                <button id="deepDreamFileButton" type="button">Add dream images</button>
+                <button id="deepDreamLastButton" type="button">Dream last image</button>
+                <button id="deepDreamButton" type="button" class="primary">DEEP Dream</button>
+              </div>
+              <input id="deepDreamFileInput" type="file" multiple accept="image/*" hidden>
               <div class="generation-controls compact">
                 <label>
                   <span>Resolution</span>
@@ -234,6 +244,14 @@
                 <label>
                   <span>Visual mutation</span>
                   <input id="imageMutation" type="range" min="0.002" max="0.18" step="0.002" value="0.04">
+                </label>
+                <label>
+                  <span>Deep Dream epochs</span>
+                  <select id="deepDreamEpochsInput">
+                    <option value="8">8 light</option>
+                    <option value="18" selected>18 deep</option>
+                    <option value="36">36 vivid</option>
+                  </select>
                 </label>
               </div>
               <pre class="model-readout compact-readout" id="imageReadout"></pre>

@@ -1585,12 +1585,57 @@
       return normalized;
     }
 
+    visualAttentionBoost(target, strength = 0.08) {
+      if (!target) return 0;
+      const latent = extractImageLatent(target);
+      const boost = clamp(Number(strength) || 0, 0, 0.2);
+      let touched = 0;
+      const active = Math.min(this.neurons, 2200);
+      const stride = Math.max(1, Math.floor(active / 420));
+      for (let i = 0; i < active; i += stride) {
+        const neuron = i;
+        if ((this.neuronTypes[neuron] || 0) === 5 || i % 7 === 0) {
+          const signal = latent[i % IMAGE_LATENT_SIZE] || this.visualMemory[i % IMAGE_LATENT_SIZE] || 0;
+          this.imgBias[neuron] = clamp(this.imgBias[neuron] + signal * boost * 0.18, -3, 3);
+          this.imgWp[neuron] = clamp(this.imgWp[neuron] + signal * boost * 0.12, -3, 3);
+          touched += 1;
+        }
+      }
+      const synStep = Math.max(1, Math.floor(this.synapses / 9000));
+      for (let i = 0; i < this.synapses; i += synStep) {
+        const fromVisual = (this.neuronTypes[this.from[i]] || 0) === 5;
+        const toVisual = (this.neuronTypes[this.to[i]] || 0) === 5;
+        if (!fromVisual && !toVisual) continue;
+        const signal = latent[(this.from[i] + this.to[i]) % IMAGE_LATENT_SIZE] || 0;
+        this.weights[i] = clamp(this.weights[i] + signal * boost * 0.04, -8, 8);
+        touched += 1;
+      }
+      return touched;
+    }
+
+    deepDreamVisual(target, prompt = "", options = {}) {
+      if (!target) return { loss: 0, delta: 0, coherence: 0, passes: 0, attentionTouched: 0 };
+      const passes = clamp(Math.floor(options.passes ?? 3), 1, 8);
+      const learningRate = clamp(Number(options.learningRate ?? 0.026), 0.001, 0.08);
+      const before = this.evaluateImage(target, prompt);
+      let loss = before;
+      let attentionTouched = 0;
+      for (let pass = 0; pass < passes; pass++) {
+        this.seeImage(target, clamp(0.28 + pass * 0.035, 0, 0.5));
+        attentionTouched += this.visualAttentionBoost(target, options.attentionBoost ?? 0.07);
+        loss = this.trainImage(target, prompt, learningRate * (1 - pass * 0.08));
+      }
+      const after = this.evaluateImage(target, prompt);
+      const coherence = clamp(1 / (1 + after * 7), 0, 1);
+      return { loss: after, delta: before - after, coherence, passes, attentionTouched };
+    }
+
     getActivity(prompt = "") {
       const state = new Float32Array(this.neurons);
       const memory = new Float32Array(MEMORY_SIZE);
-      const seed = prompt || " ";
       const maxSeed = this.synapses > 160000 ? 24 : this.synapses > 60000 ? 64 : 240;
-      for (const token of encodeTokens(seed.slice(-maxSeed), this.vocab, maxSeed, this.tokenMatcher, this.tokenToIndex)) {
+      const seed = cleanTrainingText(prompt || "", maxSeed).slice(-maxSeed) || "Hello memory recall";
+      for (const token of encodeTokens(seed, this.vocab, maxSeed, this.tokenMatcher, this.tokenToIndex)) {
         this.inputToken(state, token);
         this.step(state, memory);
       }
@@ -1615,7 +1660,8 @@
       const state = new Float32Array(this.neurons);
       const memory = new Float32Array(MEMORY_SIZE);
       const maxSeed = this.synapses > 160000 ? 24 : this.synapses > 60000 ? 64 : 240;
-      for (const token of encodeTokens((prompt || " ").slice(-maxSeed), this.vocab, maxSeed, this.tokenMatcher, this.tokenToIndex)) {
+      const seed = cleanTrainingText(prompt || "", maxSeed).slice(-maxSeed) || "Hello memory recall";
+      for (const token of encodeTokens(seed, this.vocab, maxSeed, this.tokenMatcher, this.tokenToIndex)) {
         this.inputToken(state, token);
         this.step(state, memory);
       }

@@ -370,6 +370,47 @@ async function fetchText(url, limit = 1_000_000) {
   }
 }
 
+function assertSafeImageUrl(rawUrl) {
+  const parsed = new URL(rawUrl);
+  if (parsed.protocol !== "https:") throw new Error("Deep Dream image URLs must use HTTPS.");
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === "localhost"
+    || host === "0.0.0.0"
+    || host === "::1"
+    || /^127\./.test(host)
+    || /^10\./.test(host)
+    || /^192\.168\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+  ) {
+    throw new Error("Private network image URLs are not allowed.");
+  }
+  return parsed;
+}
+
+async function fetchImageBytes(rawUrl, limit = 8 * 1024 * 1024) {
+  const parsed = assertSafeImageUrl(rawUrl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 9000);
+  try {
+    const response = await fetch(parsed, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "NeuroGenesis-local-evolution/1.0",
+        "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8"
+      }
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const mime = String(response.headers.get("content-type") || "");
+    if (!mime.startsWith("image/")) throw new Error("URL did not return an image.");
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.byteLength > limit) throw new Error("Image is too large for safe Deep Dream import.");
+    return { buffer, mime: mime.split(";")[0], name: path.basename(parsed.pathname) || "deep-dream-image" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function wikipediaArticle(title) {
   const api = new URL("https://en.wikipedia.org/w/api.php");
   api.searchParams.set("action", "query");
@@ -1031,6 +1072,20 @@ const server = http.createServer(async (req, res) => {
         hasJob: Boolean(currentJob),
         serverEvolution: serverSnapshot(),
         addresses: localAddresses()
+      });
+      return;
+    }
+
+    if (url.pathname === "/api/import/image-url" && req.method === "GET") {
+      const rawUrl = url.searchParams.get("url") || "";
+      const image = await fetchImageBytes(rawUrl);
+      sendJson(res, {
+        ok: true,
+        url: rawUrl,
+        name: image.name,
+        mime: image.mime,
+        bytes: image.buffer.byteLength,
+        data: image.buffer.toString("base64")
       });
       return;
     }
