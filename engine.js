@@ -1842,7 +1842,7 @@
     }
 
     softToolReflex(logits, sampledToken, options = {}) {
-      if (options.allowToolReflex === false || !this.toolConfidence || Math.random() > this.toolConfidence * 0.1) return sampledToken;
+      if (options.allowToolReflex === false || !this.toolConfidence || Math.random() > this.toolConfidence * 0.018) return sampledToken;
       const toolPattern = /\[|SEARCH|WIKI|FETCH|YOUTUBE|SELF_TUNE/i;
       let best = sampledToken;
       let bestValue = -Infinity;
@@ -3340,8 +3340,8 @@
         champion.dreamCount = Math.max(0, Math.floor(Number(champion.dreamCount || champion.metadata.dreamCount || 0))) + 1;
         champion.metadata.dreamCount = champion.dreamCount;
       }
-      champion.wakeCycles = options.resetWakeCycles === false ? champion.wakeCycles : 0;
-      if (options.resetToolUse !== false) champion.toolUseCount = 0;
+      champion.wakeCycles = options.resetWakeCycles === true ? 0 : champion.wakeCycles;
+      if (options.resetToolUse === true) champion.toolUseCount = 0;
       champion.metadata = { ...(champion.metadata || {}), wakeCycles: champion.wakeCycles || 0, toolUseCount: champion.toolUseCount || 0 };
       return {
         dreamed: memories.length + (corpusReplay ? 1 : 0) + weakTurns.length,
