@@ -24,6 +24,9 @@
     deepDreaming: false,
     reflecting: false,
     lastChatPair: null,
+    typingLearnTimer: 0,
+    lastTypingLearnAt: 0,
+    lastTypingLearnText: "",
     lastMemoryPressureLog: 0,
     statusTimer: 0
   };
@@ -229,6 +232,8 @@
       loss: best?.loss,
       naturalness: best?.trainingValueScore || 0,
       linguisticScore: best?.linguisticScore || 0,
+      speechCoherence: best?.speechCoherenceScore || 0,
+      passiveLearning: best?.passiveLearningScore || 0,
       contamination: best?.contaminationScore || 0,
       repetition: best?.repetitionScore || 0,
       humanFeedback: best?.humanFeedbackScore || 0,
@@ -1110,6 +1115,33 @@
     updateReadout();
   }
 
+  function scheduleTypingLearn() {
+    if (state.typingLearnTimer) clearTimeout(state.typingLearnTimer);
+    state.typingLearnTimer = setTimeout(() => {
+      state.typingLearnTimer = 0;
+      learnFromTypingNow();
+    }, 900);
+  }
+
+  function learnFromTypingNow() {
+    const text = el("chatPrompt")?.value?.trim() || "";
+    if (text.length < 12) return;
+    if (text === state.lastTypingLearnText) return;
+    if (Date.now() - state.lastTypingLearnAt < 2200) return;
+    const delta = Math.abs(text.length - (state.lastTypingLearnText || "").length);
+    if (delta < 8 && !/[.!?\n]$/.test(text)) return;
+    const result = state.lab.passiveLearnFromTyping(text, {
+      minChars: 12,
+      learningRate: 0.005,
+      adaptChars: 620
+    });
+    if (!result.learned) return;
+    state.lastTypingLearnAt = Date.now();
+    state.lastTypingLearnText = text;
+    setToolStatus(`Listening as you type: profile ${result.userProfileChars || 0} chars, speech ${Number(result.speech || 0).toFixed(2)}.`);
+    updateReadout();
+  }
+
   function rememberConversation() {
     const text = Array.from(document.querySelectorAll(".message")).map(node => node.textContent).join("\n");
     state.lab.remember(text, { source: "human", strength: 1.5 });
@@ -1910,6 +1942,8 @@
     });
 
     el("chatButton").addEventListener("click", generateChat);
+    el("chatPrompt").addEventListener("input", scheduleTypingLearn);
+    el("chatPrompt").addEventListener("blur", learnFromTypingNow);
     el("speechButton").addEventListener("click", startSpeechInput);
     el("rememberChatButton").addEventListener("click", rememberConversation);
     if (el("goodReplyButton")) el("goodReplyButton").addEventListener("click", () => rateLastReply(1).catch(error => log(`Feedback failed: ${error.message}`)));

@@ -675,6 +675,8 @@
       this.sensoryGateEfficiency = options.sensoryGateEfficiency || options.metadata?.sensoryGateEfficiency || 0;
       this.sensoryGateBonus = options.sensoryGateBonus || 0;
       this.linguisticScore = options.linguisticScore || options.metadata?.linguisticScore || 0;
+      this.speechCoherenceScore = options.speechCoherenceScore || options.metadata?.speechCoherenceScore || 0;
+      this.passiveLearningScore = options.passiveLearningScore || options.metadata?.passiveLearningScore || 0;
       this.userProfileStrength = options.userProfileStrength || options.metadata?.userProfileStrength || 0;
       this.toolConfidence = clamp(Number(options.toolConfidence ?? options.metadata?.toolConfidence ?? 0.08), 0, 1);
       this.profileAttentionMultiplier = clamp(Number(options.profileAttentionMultiplier ?? options.metadata?.profileAttentionMultiplier ?? 1.85), 1, 3.2);
@@ -767,6 +769,8 @@
       this.sensoryGateEfficiency = clamp(Number(this.sensoryGateEfficiency || this.metadata?.sensoryGateEfficiency || 0), 0, 1);
       this.sensoryGateBonus = clamp(Number(this.sensoryGateBonus || 0), 0, 0.08);
       this.linguisticScore = clamp(Number(this.linguisticScore || this.metadata?.linguisticScore || 0), 0, 1);
+      this.speechCoherenceScore = clamp(Number(this.speechCoherenceScore || this.metadata?.speechCoherenceScore || 0), 0, 1);
+      this.passiveLearningScore = clamp(Number(this.passiveLearningScore || this.metadata?.passiveLearningScore || 0), 0, 1);
       this.userProfileStrength = clamp(Number(this.userProfileStrength || this.metadata?.userProfileStrength || 0), 0, 1);
       this.wakeCycles = Math.max(0, Math.floor(Number(this.wakeCycles || this.metadata?.wakeCycles || 0)));
       this.toolUseCount = Math.max(0, Math.floor(Number(this.toolUseCount || this.metadata?.toolUseCount || 0)));
@@ -776,6 +780,8 @@
         profileAttentionMultiplier: this.profileAttentionMultiplier,
         sensoryGateEfficiency: this.sensoryGateEfficiency,
         linguisticScore: this.linguisticScore,
+        speechCoherenceScore: this.speechCoherenceScore,
+        passiveLearningScore: this.passiveLearningScore,
         userProfileStrength: this.userProfileStrength,
         wakeCycles: this.wakeCycles,
         toolUseCount: this.toolUseCount
@@ -813,6 +819,8 @@
         sensoryGateEfficiency: this.sensoryGateEfficiency,
         sensoryGateBonus: this.sensoryGateBonus,
         linguisticScore: this.linguisticScore,
+        speechCoherenceScore: this.speechCoherenceScore,
+        passiveLearningScore: this.passiveLearningScore,
         userProfileStrength: this.userProfileStrength,
         toolConfidence: this.toolConfidence,
         profileAttentionMultiplier: this.profileAttentionMultiplier,
@@ -822,7 +830,7 @@
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
         stableFitness: this.stableFitness || 0,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0, toolConfidence: this.toolConfidence || 0, wakeCycles: this.wakeCycles || 0, toolUseCount: this.toolUseCount || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0, speechCoherenceScore: this.speechCoherenceScore || 0, passiveLearningScore: this.passiveLearningScore || 0, toolConfidence: this.toolConfidence || 0, wakeCycles: this.wakeCycles || 0, toolUseCount: this.toolUseCount || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -896,7 +904,7 @@
         toolUseScore: this.toolUseScore,
         embeddingMutationGain: this.embeddingMutationGain,
         stableFitness: this.stableFitness || 0,
-        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0, toolConfidence: this.toolConfidence || 0, wakeCycles: this.wakeCycles || 0, toolUseCount: this.toolUseCount || 0 },
+        metadata: { ...this.metadata, dreamCount: this.dreamCount || 0, toolUseScore: this.toolUseScore || 0, stableFitness: this.stableFitness || 0, humanFeedbackScore: this.humanFeedbackScore || 0, speechCoherenceScore: this.speechCoherenceScore || 0, passiveLearningScore: this.passiveLearningScore || 0, toolConfidence: this.toolConfidence || 0, wakeCycles: this.wakeCycles || 0, toolUseCount: this.toolUseCount || 0 },
         previousFitness: this.previousFitness,
         previousNeurons: this.previousNeurons,
         previousSynapses: this.previousSynapses,
@@ -1812,6 +1820,24 @@
       return { score: this.coherenceScore, dialogue: this.dialogueScore, contamination: this.contaminationScore, repetition: this.repetitionScore, value: this.trainingValueScore, linguistic: this.linguisticScore, generated };
     }
 
+    evaluateSpeechCoherence(prompt = "", referenceText = "") {
+      const cleanPrompt = cleanTrainingText(prompt, 900) || "Reply naturally.";
+      const reference = cleanTrainingText(referenceText || prompt, 1800);
+      const generated = this.generate(cleanPrompt, 220, 0.66, { plastic: false, allowToolReflex: false });
+      const linguistic = calculateLinguisticFitness(generated);
+      const coherent = coherenceScore(generated, reference);
+      const dialogue = naturalDialogueScore(generated);
+      const contamination = metaContaminationScore(generated);
+      const repetition = repetitionScore(generated);
+      const score = clamp(linguistic * 0.34 + coherent * 0.3 + dialogue * 0.26 - contamination * 0.28 - repetition * 0.22, 0, 1);
+      this.speechCoherenceScore = clamp((this.speechCoherenceScore || 0) * 0.68 + score * 0.32, 0, 1);
+      this.linguisticScore = clamp((this.linguisticScore || 0) * 0.78 + linguistic * 0.22, 0, 1);
+      this.dialogueScore = clamp((this.dialogueScore || 0) * 0.8 + dialogue * 0.2, 0, 1);
+      this.contaminationScore = clamp((this.contaminationScore || 0) * 0.8 + contamination * 0.2, 0, 1);
+      this.repetitionScore = clamp((this.repetitionScore || 0) * 0.8 + repetition * 0.2, 0, 1);
+      return { score: this.speechCoherenceScore, generated, linguistic, coherent, dialogue };
+    }
+
     generate(prompt, length = 420, temperature = 0.9, options = {}) {
       const state = new Float32Array(this.neurons);
       const memory = new Float32Array(MEMORY_SIZE);
@@ -2573,6 +2599,8 @@
       const humanFeedbackBonus = Math.min(0.32, Math.max(0, genome.humanFeedbackScore || 0) * 0.32);
       const sensoryGateBonus = Math.min(0.08, Math.max(0, genome.sensoryGateBonus || genome.sensoryGateEfficiency * 0.08 || 0));
       const linguisticBonus = Math.min(0.18, Math.max(0, genome.linguisticScore || 0) * 0.18);
+      const speechCoherenceBonus = Math.min(0.24, Math.max(0, genome.speechCoherenceScore || 0) * 0.24);
+      const passiveLearningBonus = Math.min(0.14, Math.max(0, genome.passiveLearningScore || 0) * 0.14);
       const profileStrengthBonus = Math.min(0.12, Math.max(0, genome.userProfileStrength || 0) * 0.12);
       const contaminationPenalty = Math.min(0.26, Math.max(0, genome.contaminationScore || 0) * 0.26);
       const repetitionPenalty = Math.min(0.22, Math.max(0, genome.repetitionScore || 0) * 0.22);
@@ -2585,6 +2613,8 @@
       genome.userProfileBonus = userProfileBonus;
       genome.sensoryGateBonus = sensoryGateBonus;
       genome.linguisticBonus = linguisticBonus;
+      genome.speechCoherenceBonus = speechCoherenceBonus;
+      genome.passiveLearningBonus = passiveLearningBonus;
       genome.profileStrengthBonus = profileStrengthBonus;
       genome.contaminationPenalty = contaminationPenalty;
       genome.repetitionPenalty = repetitionPenalty;
@@ -2603,7 +2633,7 @@
 
       const scaleFloor = options.protectScale === false ? 0.18 : 0.72;
       const scalePenalty = Math.min(1, Math.max(scaleFloor, Math.sqrt(neuronRatio) * 0.72 + Math.sqrt(synapseRatio) * 0.28));
-      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + naturalnessBonus + humanFeedbackBonus + userProfileBonus + sensoryGateBonus + linguisticBonus + profileStrengthBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty) * (1 - contaminationPenalty) * (1 - repetitionPenalty);
+      genome.fitness = shapedBase * topologyBonus * scalePenalty * (1 + growthBonus + healthyScaleBonus + toolUseBonus + memoryStabilityBonus + coherenceBonus + dialogueBonus + naturalnessBonus + humanFeedbackBonus + userProfileBonus + sensoryGateBonus + linguisticBonus + speechCoherenceBonus + passiveLearningBonus + profileStrengthBonus + spiralNoveltyBonus) * (1 - memoryBalancePenalty) * (1 - contaminationPenalty) * (1 - repetitionPenalty);
       const immigrantProtected = genome.origin === "immigrant" && Number(genome.metadata?.protectedUntil || 0) > this.generation;
       if (genome.origin === "immigrant" && neuronRatio < 0.55 && !immigrantProtected) genome.fitness *= 0.62;
       genome.stableFitness = clamp(Math.max(genome.fitness, (genome.stableFitness || 0) * 0.992), 0, Math.max(1, genome.fitness * 1.35 + 0.1));
@@ -2787,6 +2817,7 @@
         const probeReference = trainingText.slice(0, options.dialogueProbeReferenceChars || 1600);
         for (let i = 0; i < probeCount; i++) {
           this.population[i].evaluateCoherence(probeReference, "Answer naturally and usefully in one or two sentences.");
+          if (i < Math.min(4, probeCount)) this.population[i].evaluateSpeechCoherence("Reply to the user in clear natural speech.", probeReference);
           this.shapeFitness(this.population[i], fitnessOptions);
         }
         this.population.sort((a, b) => this.selectionScore(b) - this.selectionScore(a));
@@ -3239,6 +3270,25 @@
       best.humanFeedbackScore = clamp((best.humanFeedbackScore || 0) * 0.92 - 0.05, 0, 1);
       this.shapeFitness(best, { protectScale: true, trainingText: avoid });
       return { accepted: true, rating: -1, value, fitness: best.fitness };
+    }
+
+    passiveLearnFromTyping(text = "", options = {}) {
+      const cleaned = cleanTrainingText(text, options.maxChars || 1600);
+      if (cleaned.length < (options.minChars || 12)) return { learned: false, reason: "too-short" };
+      const value = trainingValueScore(cleaned);
+      if (value < (options.minValue || 0.2)) return { learned: false, reason: "low-value", value };
+      this.updateUserProfile(`User: ${cleaned}`);
+      const best = this.best();
+      this.prepareGenomeContext(best);
+      const pair = formatDialoguePair(cleaned, "I should listen to this wording and answer clearly in the user's style.");
+      best.adaptDialogue(`${this.userProfile || ""}\n${pair}`, options.learningRate || 0.006, options.adaptChars || 700);
+      const probe = best.evaluateSpeechCoherence(cleaned, `${this.userProfile}\n${cleaned}`);
+      best.passiveLearningScore = clamp((best.passiveLearningScore || 0) * 0.78 + Math.max(value, probe.score || 0) * 0.22, 0, 1);
+      if (cleaned.length >= 48 && /[.!?]$|\n/.test(cleaned)) {
+        this.remember(`User: ${cleaned}`, { source: "human", strength: 1.25 });
+      }
+      this.shapeFitness(best, { protectScale: true, trainingText: pair });
+      return { learned: true, value, speech: probe.score || 0, userProfileChars: this.userProfile.length, fitness: best.fitness };
     }
 
     evolveSensoryGate(genome = this.best(), rawTokens = "") {
